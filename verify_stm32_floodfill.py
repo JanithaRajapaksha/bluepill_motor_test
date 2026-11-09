@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-STM32 Micromouse Flood-Fill Verification Tool
-=============================================
-Uploads a maze from the FloodFill-Micromouse submodule to the STM32 microcontroller
-over UART (default: COM5), triggers the embedded flood-fill solver in firmware,
-streams real-time step telemetry, and verifies that the goal was successfully reached.
+STM32 Micromouse Blind Flood-Fill Verification Tool
+===================================================
+Executes blind cell-by-cell maze navigation with the STM32 microcontroller.
+Python acts as the maze information provider:
+  1. The complete maze layout is held exclusively in Python (never preloaded to STM32).
+  2. Robot starts at (0, 0) knowing only the boundaries and target goal center.
+  3. Robot requests wall data (REQ_WALLS x y dir) upon arrival at each cell.
+  4. Python inspects the cell and sends relative walls (WALLS <front> <left> <right>).
+  5. Robot plans its next step, drives motors by encoder ticks, and reports arrival (ARRIVED).
 
 Usage:
-    python verify_stm32_floodfill.py [--port COM5] [--baud 115200] [--maze 6]
-    python verify_stm32_floodfill.py --maze 6
-    python verify_stm32_floodfill.py --maze 6 --bench
+    python verify_stm32_floodfill.py [--port COM5] [--maze 6] [--motors]
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import pathlib
 import sys
 import time
@@ -51,7 +52,7 @@ RESET = "\033[0m"
 
 def print_banner() -> None:
     print(f"{CYAN}{BOLD}=============================================================={RESET}")
-    print(f"{CYAN}{BOLD}   STM32 Embedded Flood-Fill Solver & Verification Tool       {RESET}")
+    print(f"{CYAN}{BOLD}   STM32 Micromouse Blind Cell-by-Cell Flood-Fill Tool        {RESET}")
     print(f"{CYAN}{BOLD}=============================================================={RESET}")
 
 
@@ -60,7 +61,6 @@ def get_default_port() -> str:
     ports = [p.device for p in serial.tools.list_ports.comports()]
     if "COM5" in ports:
         return "COM5"
-    # Fallback to any non-Bluetooth COM port if COM5 not listed
     for p in serial.tools.list_ports.comports():
         if "bluetooth" not in p.description.lower() and "stlink" not in p.description.lower():
             return p.device
@@ -106,96 +106,67 @@ def load_maze(preset: str | int = "6") -> Any:
         )
 
 
-def extract_internal_walls(maze: Any) -> list[tuple[int, int, str]]:
-    """Extracts internal walls for each cell (excluding outer perimeter walls)."""
-    wall_list: list[tuple[int, int, str]] = []
-    size = maze.size
-
+def query_cell_relative_walls(maze: Any, x: int, y: int, orientation: str) -> tuple[int, int, int]:
+    """
+    Returns (front, left, right) relative to the robot's current cardinal heading.
+    Each value is 1 if a wall exists, 0 if open.
+    The complete maze is held exclusively here in Python.
+    """
+    cell = None
     for row in maze.cells:
         for c in row:
-            x, y = c.x, c.y
-            dirs = []
-            # Only send internal walls (perimeter is automatically set by MAZE_START)
-            if c.is_north_wall and y < size - 1:
-                dirs.append("N")
-            if c.is_east_wall and x < size - 1:
-                dirs.append("E")
-            if c.is_south_wall and y > 0:
-                dirs.append("S")
-            if c.is_west_wall and x > 0:
-                dirs.append("W")
+            if c.x == x and c.y == y:
+                cell = c
+                break
+        if cell is not None:
+            break
 
-            if dirs:
-                wall_list.append((x, y, "".join(dirs)))
+    if cell is None:
+        return (1, 1, 1)
 
-    return wall_list
+    cw = {
+        "N": 1 if cell.is_north_wall else 0,
+        "E": 1 if cell.is_east_wall else 0,
+        "S": 1 if cell.is_south_wall else 0,
+        "W": 1 if cell.is_west_wall else 0,
+    }
+    # Heading -> (Front cardinal dir, Left cardinal dir, Right cardinal dir)
+    hd = {
+        "N": ("N", "W", "E"),
+        "E": ("E", "N", "S"),
+        "S": ("S", "E", "W"),
+        "W": ("W", "S", "N"),
+    }
+    f_dir, l_dir, r_dir = hd.get(orientation.upper(), ("N", "W", "E"))
+    return (cw[f_dir], cw[l_dir], cw[r_dir])
 
 
-def upload_maze_to_stm32(
+def run_blind_solve_and_verify(
     ser: serial.Serial,
     maze: Any,
-    verbose: bool = True,
-) -> bool:
-    """Uploads the maze geometry to the STM32 via line protocol."""
-    size = maze.size
-    walls = extract_internal_walls(maze)
-
-    if verbose:
-        print(f"\n{BOLD}[1/3] Uploading {size}x{size} maze to STM32 ({len(walls)} cell walls)...{RESET}")
-
-    # Flush input buffer
-    ser.reset_input_buffer()
-
-    # 1. Send MAZE_START <size>
-    cmd_init = f"MAZE_START {size}\r\n".encode("ascii")
-    ser.write(cmd_init)
-    time.sleep(0.04)
-
-    # Read response
-    resp = ser.read(ser.in_waiting or 128).decode("ascii", errors="replace")
-    if "OK: MAZE_INIT" not in resp:
-        # Retry once
-        ser.write(cmd_init)
-        time.sleep(0.08)
-        resp = ser.read(ser.in_waiting or 128).decode("ascii", errors="replace")
-        if "OK: MAZE_INIT" not in resp:
-            print(f"{RED}Error: STM32 did not acknowledge MAZE_START. Response: {resp.strip()}{RESET}")
-            return False
-
-    if verbose:
-        print(f"  {GREEN}✔{RESET} Maze initialized on STM32: {size}x{size}")
-
-    # 2. Upload internal walls
-    uploaded = 0
-    for x, y, dirs in walls:
-        wall_cmd = f"WALL {x} {y} {dirs}\r\n".encode("ascii")
-        ser.write(wall_cmd)
-        time.sleep(0.015)
-        uploaded += 1
-
-    time.sleep(0.05)
-    # Clear any residual ACKs
-    ser.reset_input_buffer()
-
-    if verbose:
-        print(f"  {GREEN}✔{RESET} Successfully uploaded {uploaded} wall specifications to STM32 RAM.")
-
-    return True
-
-
-def solve_and_verify(
-    ser: serial.Serial,
-    maze: Any,
-    timeout: float = 12.0,
+    timeout: float = 60.0,
+    with_motors: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
-    """Triggers the STM32 firmware solver and verifies execution."""
-    print(f"\n{BOLD}[2/3] Triggering STM32 Flood-Fill Solver ('SOLVE')...{RESET}")
+    """
+    Executes blind cell-by-cell maze navigation.
+    Python acts as the maze information provider:
+      1. Robot starts at (0,0) with no preloaded maze.
+      2. Robot requests wall information (REQ_WALLS x y dir).
+      3. Python queries the complete maze internally and sends relative WALLS F L R.
+      4. Robot decides its direction, performs encoder-based movement.
+      5. Robot reports cell arrival (ARRIVED x y dir).
+      6. Python updates logical coordinates and returns new walls.
+    """
+    mode_str = "with physical motors" if with_motors else "simulation"
+    print(f"\n{BOLD}[1/2] Starting Blind Cell-by-Cell Navigation ({maze.size}x{maze.size}, {mode_str})...{RESET}")
+    print(f"  {YELLOW}• Complete maze kept strictly in Python memory (zero walls preloaded to STM32){RESET}")
+    print(f"  {YELLOW}• Robot requests relative walls (F, L, R) upon arrival at each cell{RESET}")
 
-    # Clear input buffer before solve
     ser.reset_input_buffer()
 
-    # Send SOLVE command
-    ser.write(b"SOLVE\r\n")
+    # Trigger blind solve on STM32
+    cmd = f"BLIND_RUN {maze.size}\r\n".encode("ascii") if with_motors else f"BLIND_START {maze.size}\r\n".encode("ascii")
+    ser.write(cmd)
 
     start_time = time.time()
     steps_received: list[str] = []
@@ -203,25 +174,52 @@ def solve_and_verify(
     success = False
     final_pos: Optional[tuple[int, int]] = None
     hw_total_us: Optional[int] = None
-    hw_avg_us: Optional[float] = None
+    wall_queries_served = 0
+    arrivals_confirmed = 0
+
+    logical_x = 0
+    logical_y = 0
+    logical_dir = "N"
 
     centers = {(c.x, c.y) for c in maze.get_centers()}
 
-    print(f"{DIM}--- Streaming live telemetry from STM32 ---{RESET}")
+    print(f"{DIM}--- Live Blind Navigation Handshake ---{RESET}")
 
     while (time.time() - start_time) < timeout:
         line = ser.readline().decode("latin-1", errors="replace").strip()
         if not line:
             continue
 
-        # Print all lines from STM32
-        if "[STEP" in line:
+        if line.startswith("REQ_WALLS"):
+            # Format: REQ_WALLS <x> <y> <dir>
+            parts = line.split()
+            rx = int(parts[1]) if len(parts) > 1 else logical_x
+            ry = int(parts[2]) if len(parts) > 2 else logical_y
+            r_dir = parts[3].upper() if len(parts) > 3 else logical_dir
+
+            f, l, r = query_cell_relative_walls(maze, rx, ry, r_dir)
+            ser.write(f"WALLS {f} {l} {r}\r\n".encode("ascii"))
+            wall_queries_served += 1
+            print(f"  {YELLOW}➔ [ORACLE]{RESET} Sensed walls at ({rx}, {ry}) Dir:{r_dir} -> {BOLD}Front:{f} Left:{l} Right:{r}{RESET}")
+
+        elif line.startswith("ARRIVED"):
+            # Format: ARRIVED <x> <y> <dir>
+            parts = line.split()
+            logical_x = int(parts[1]) if len(parts) > 1 else logical_x
+            logical_y = int(parts[2]) if len(parts) > 2 else logical_y
+            logical_dir = parts[3].upper() if len(parts) > 3 else logical_dir
+            arrivals_confirmed += 1
+            final_pos = (logical_x, logical_y)
+            print(f"  {GREEN}✔ [ORACLE]{RESET} Robot completed encoder travel to cell ({logical_x}, {logical_y}) facing {logical_dir} (Arrival #{arrivals_confirmed})")
+
+        elif "[STEP" in line:
             print(f"  {CYAN}{line}{RESET}")
             steps_received.append(line)
+        elif ">> Motors:" in line:
+            print(f"  {YELLOW}{BOLD}{line}{RESET}")
         elif "[GOAL]" in line:
             print(f"  {GREEN}{BOLD}{line}{RESET}")
             goal_reached = True
-            # Extract coordinates from e.g. "[GOAL] Reached at (3, 3) in 18 steps!"
             try:
                 coords_part = line.split("at (")[1].split(")")[0]
                 gx, gy = map(int, coords_part.split(","))
@@ -236,30 +234,19 @@ def solve_and_verify(
             print(f"  {RED}{BOLD}{line}{RESET}")
             success = False
             break
-        elif "Total Time:" in line:
+        elif "Total Compute:" in line:
             print(f"  {line}")
             try:
                 hw_total_us = int(line.split(":")[1].split("us")[0].strip())
             except Exception:
                 pass
-        elif "Avg per Step:" in line:
-            print(f"  {line}")
-            try:
-                hw_avg_us = float(line.split(":")[1].split("us")[0].strip())
-            except Exception:
-                pass
-        elif "===" in line or "---" in line or "Execution Results" in line or "Memory Footprint" in line:
+        elif "===" in line or "---" in line or "Execution Results" in line:
             print(f"  {DIM}{line}{RESET}")
 
-    print(f"{DIM}--- End of STM32 stream ---{RESET}")
+    print(f"{DIM}--- End of Blind Navigation stream ---{RESET}")
 
-    # Verification criteria:
-    # 1. Steps were recorded
-    # 2. Goal reached flag is true
-    # 3. Final position is within target centers
-    # 4. Status was SUCCESS
     is_valid_goal = final_pos in centers if final_pos is not None else False
-    passed = goal_reached and success and is_valid_goal and len(steps_received) > 0
+    passed = goal_reached and success and is_valid_goal and wall_queries_served > 0
 
     stats = {
         "step_count": len(steps_received),
@@ -269,41 +256,17 @@ def solve_and_verify(
         "target_centers": list(centers),
         "firmware_status": "SUCCESS" if success else "FAILED",
         "hw_total_us": hw_total_us,
-        "hw_avg_us": hw_avg_us,
+        "hw_avg_us": (hw_total_us / len(steps_received)) if (hw_total_us and steps_received) else None,
+        "wall_queries_served": wall_queries_served,
+        "arrivals_confirmed": arrivals_confirmed,
     }
 
     return passed, stats
 
 
-def run_benchmark_preset(
-    ser: serial.Serial,
-    size: int = 6,
-    timeout: float = 12.0,
-) -> tuple[bool, dict[str, Any]]:
-    """Runs a built-in benchmark directly on the STM32 via single key or BENCH command."""
-    print(f"\n{BOLD}[1/2] Triggering built-in {size}x{size} benchmark on STM32...{RESET}")
-    ser.reset_input_buffer()
-
-    # Send benchmark key (e.g. '6' for 6x6, '1' for 10x10, '2' for 16x16)
-    if size == 6:
-        ser.write(b"6\r\n")
-    elif size == 10:
-        ser.write(b"1\r\n")
-    elif size == 16:
-        ser.write(b"2\r\n")
-    elif size == 5:
-        ser.write(b"5\r\n")
-    else:
-        ser.write(f"BENCH {size}\r\n".encode("ascii"))
-
-    # Reuse solver listener with preset maze
-    maze = load_maze(str(size))
-    return solve_and_verify(ser, maze, timeout=timeout)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Upload maze to STM32 and verify embedded flood-fill solver."
+        description="Verify STM32 blind cell-by-cell micromouse navigation."
     )
     parser.add_argument(
         "--port",
@@ -320,18 +283,18 @@ def main() -> int:
         "--maze",
         default="6",
         choices=["6", "10", "16", "5", "6x6", "10x10", "16x16", "5x5"],
-        help="Maze dimension/preset to upload and solve: 6 (default), 10, 16, 5 (or 6x6, 10x10, etc.)",
+        help="Maze dimension/preset: 6 (default), 10, 16, 5 (or 6x6, 10x10, etc.)",
     )
     parser.add_argument(
-        "--bench",
+        "--motors",
         action="store_true",
-        help="Run firmware preset benchmark instead of dynamic upload",
+        help="Actuate physical motors in real time during maze solving (sends BLIND_RUN)",
     )
     parser.add_argument(
         "--timeout",
         type=float,
-        default=10.0,
-        help="Timeout in seconds (default: 10.0s)",
+        default=None,
+        help="Timeout in seconds (default: 20.0s for sim, 90.0s for motors)",
     )
 
     args = parser.parse_args()
@@ -340,6 +303,12 @@ def main() -> int:
     port = args.port or get_default_port()
     baud = args.baud
     maze_preset = args.maze
+    with_motors = args.motors
+
+    if args.timeout is not None:
+        timeout = args.timeout
+    else:
+        timeout = 90.0 if with_motors else 20.0
 
     print(f"Connecting to STM32 Blue Pill on {BOLD}{port}{RESET} @ {baud} baud...")
 
@@ -358,35 +327,29 @@ def main() -> int:
     time.sleep(0.3)
 
     try:
-        # Load maze from FloodFill-Micromouse
+        # Load maze in Python memory only
         maze = load_maze(maze_preset)
-        print(f"Loaded maze from submodule: {BOLD}{maze.size}x{maze.size}{RESET} (goal centers: {maze.get_centers()})")
+        print(f"Loaded maze in Python: {BOLD}{maze.size}x{maze.size}{RESET} (goal centers: {maze.get_centers()})")
 
-        if args.bench:
-            passed, stats = run_benchmark_preset(ser, size=maze.size, timeout=args.timeout)
-        else:
-            # 1. Upload maze
-            if not upload_maze_to_stm32(ser, maze):
-                print(f"{RED}Maze upload failed.{RESET}")
-                return 1
+        passed, stats = run_blind_solve_and_verify(ser, maze, timeout=timeout, with_motors=with_motors)
 
-            # 2. Solve and verify
-            passed, stats = solve_and_verify(ser, maze, timeout=args.timeout)
-
-        # 3. Print Final Verification Summary
+        # Print Final Verification Summary
         print(f"\n{CYAN}{BOLD}=============================================================={RESET}")
         print(f"{CYAN}{BOLD}               STM32 VERIFICATION REPORT                      {RESET}")
         print(f"{CYAN}{BOLD}=============================================================={RESET}")
-        print(f"  Maze Dimension:    {maze.size}x{maze.size}")
-        print(f"  Goal Cells:        {stats['target_centers']}")
-        print(f"  Steps Executed:    {stats['step_count']} steps")
-        print(f"  Final Position:    {stats['final_pos']} " + (f"{GREEN}[GOAL]{RESET}" if stats['valid_goal_center'] else f"{RED}[NOT GOAL]{RESET}"))
-        print(f"  Firmware Status:   {GREEN if stats['firmware_status'] == 'SUCCESS' else RED}{stats['firmware_status']}{RESET}")
+        print(f"  Maze Dimension:       {maze.size}x{maze.size}")
+        print(f"  Navigation Mode:      BLIND (Cell-by-cell relative wall discovery)")
+        print(f"  Goal Cells:           {stats['target_centers']}")
+        print(f"  Steps Executed:       {stats['step_count']} steps")
+        print(f"  Wall Requests Served: {stats['wall_queries_served']}")
+        print(f"  Arrivals Confirmed:   {stats['arrivals_confirmed']}")
+        print(f"  Final Position:       {stats['final_pos']} " + (f"{GREEN}[GOAL]{RESET}" if stats['valid_goal_center'] else f"{RED}[NOT GOAL]{RESET}"))
+        print(f"  Firmware Status:      {GREEN if stats['firmware_status'] == 'SUCCESS' else RED}{stats['firmware_status']}{RESET}")
 
-        if stats["hw_total_us"] is not None:
-            print(f"  STM32 Solve Time:  {stats['hw_total_us']} us ({stats['hw_total_us']/1000.0:.3f} ms)")
-        if stats["hw_avg_us"] is not None:
-            print(f"  Avg Time per Step: {stats['hw_avg_us']:.2f} us (Hardware 72 MHz DWT)")
+        if stats.get("hw_total_us") is not None:
+            print(f"  STM32 Solve Time:     {stats['hw_total_us']} us ({stats['hw_total_us']/1000.0:.3f} ms)")
+        if stats.get("hw_avg_us") is not None:
+            print(f"  Avg Time per Step:    {stats['hw_avg_us']:.2f} us (Hardware 72 MHz DWT)")
 
         print(f"{CYAN}{BOLD}=============================================================={RESET}")
 

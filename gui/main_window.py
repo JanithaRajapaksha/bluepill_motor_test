@@ -518,6 +518,8 @@ class OdometryApp(QMainWindow):
         self.current_w_cmd = 0.0
         self.sidebar.highlight_dpad(0, 0)
         self.send_command("x")
+        self.canvas.reset_discovered()
+        self.canvas.mark_cell_discovered(0, 0)
         if self.canvas.maze is not None:
             cell_size = self.sidebar.get_cell_distance_mm()
             self.odometry.reset(cell_size * 0.5, cell_size * 0.5, 0.0)
@@ -557,13 +559,15 @@ class OdometryApp(QMainWindow):
         cell_size = self.sidebar.get_cell_distance_mm()
         x0 = cell_size * 0.5
         y0 = cell_size * 0.5
-        self.odometry.set_pose(x0, y0, heading_rad=0.0)
+        self.odometry.reset(x0, y0, heading_rad=0.0)
         self.footer.update_pose(x0, y0, 0.0)
         self.sidebar.set_motion_label("PLACED AT CELL (0,0)")
+        self.canvas.reset_discovered()
+        self.canvas.mark_cell_discovered(0, 0)
         self.canvas.update()
 
     def _on_solve_maze_clicked(self) -> None:
-        """Uploads current maze to STM32 and triggers embedded flood-fill solver."""
+        """Triggers embedded blind flood-fill solver on STM32."""
         if self.connection is None or not self.connection.is_open:
             QMessageBox.information(
                 self,
@@ -576,42 +580,43 @@ class OdometryApp(QMainWindow):
             self._on_load_maze("6x6 Test Maze")
 
         self.place_robot_at_cell_0_0()
-        self.sidebar.set_motion_label("SOLVING ON STM32...")
-        self.sidebar.set_maze_status("Solving maze with embedded flood-fill...")
+        drive_motors = self.sidebar.chk_drive_motors.isChecked()
+        mode_str = "DRIVING MOTORS" if drive_motors else "SIMULATION"
+        self.sidebar.set_motion_label(f"BLIND SOLVE [{mode_str}]...")
+        self.sidebar.set_maze_status(f"Blind cell-by-cell navigation ({mode_str.lower()})...")
 
-        # Run upload and solve in a quick background thread to avoid blocking GUI
-        threading.Thread(target=self._upload_and_solve_worker, daemon=True).start()
+        # Run solve in a quick background thread to avoid blocking GUI
+        threading.Thread(target=self._upload_and_solve_worker, args=(drive_motors,), daemon=True).start()
 
-    def _upload_and_solve_worker(self) -> None:
+    def _upload_and_solve_worker(self, drive_motors: bool = False) -> None:
         try:
-            from verify_stm32_floodfill import extract_internal_walls
-
             maze = self.canvas.maze
             if maze is None or self.connection is None:
                 return
 
             size = maze.size
-            walls = extract_internal_walls(maze)
+            cell_size = self.sidebar.get_cell_distance_mm()
+            x0 = cell_size * 0.5
+            y0 = cell_size * 0.5
 
-            # 1. Send MAZE_START
-            with self.write_lock:
-                if self.connection and self.connection.is_open:
-                    self.connection.write(f"MAZE_START {size}\r\n".encode("ascii"))
-            time.sleep(0.06)
+            # Reset odometry state and baseline at cell (0, 0)
+            self.odometry.reset(x0, y0, heading_rad=0.0)
 
-            # 2. Upload internal walls
-            for x, y, dirs in walls:
+            # If driving motors, reset firmware encoder counter so hardware & software start at 0
+            if drive_motors:
                 with self.write_lock:
                     if self.connection and self.connection.is_open:
-                        self.connection.write(f"WALL {x} {y} {dirs}\r\n".encode("ascii"))
-                time.sleep(0.015)
+                        self.connection.write(b"r\r\n")
+                time.sleep(0.08)
 
-            time.sleep(0.06)
-
-            # 3. Trigger SOLVE
+            # Blind navigation: NO walls are uploaded to STM32. Complete maze stays strictly in Python.
+            cmd = f"BLIND_RUN {size}\r\n".encode("ascii") if drive_motors else f"BLIND_START {size}\r\n".encode("ascii")
             with self.write_lock:
                 if self.connection and self.connection.is_open:
-                    self.connection.write(b"SOLVE\r\n")
+                    self.connection.write(cmd)
+
+        except Exception as exc:
+            print("Solve worker error:", exc)
 
         except Exception as exc:
             print("Solve worker error:", exc)
@@ -633,21 +638,53 @@ class OdometryApp(QMainWindow):
         self.sidebar.set_note(f"Serial Error: {message}")
 
     def _on_telemetry_line(self, line: str) -> None:
+        # Check for Blind Navigation Wall Requests from Robot
+        if line.startswith("REQ_WALLS"):
+            parts = line.split()
+            rx = int(parts[1]) if len(parts) > 1 else 0
+            ry = int(parts[2]) if len(parts) > 2 else 0
+            r_dir = parts[3].upper() if len(parts) > 3 else "N"
+            self.canvas.mark_cell_discovered(rx, ry)
+            if self.canvas.maze is not None:
+                from verify_stm32_floodfill import query_cell_relative_walls
+                f, l, r = query_cell_relative_walls(self.canvas.maze, rx, ry, r_dir)
+                with self.write_lock:
+                    if self.connection and self.connection.is_open:
+                        self.connection.write(f"WALLS {f} {l} {r}\r\n".encode("ascii"))
+                self.sidebar.set_note(f"Oracle: Supplied walls for ({rx},{ry}) {r_dir} -> F:{f} L:{l} R:{r}")
+            return
+
+        # Check for Blind Navigation Cell Arrival Confirmation
+        if line.startswith("ARRIVED"):
+            parts = line.split()
+            rx = int(parts[1]) if len(parts) > 1 else 0
+            ry = int(parts[2]) if len(parts) > 2 else 0
+            r_dir = parts[3].upper() if len(parts) > 3 else "N"
+            self.canvas.mark_cell_discovered(rx, ry)
+            cell_size = self.sidebar.get_cell_distance_mm()
+            x_mm = (rx + 0.5) * cell_size
+            y_mm = (ry + 0.5) * cell_size
+            heading_map = {"N": 0.0, "E": -math.pi / 2.0, "S": math.pi, "W": math.pi / 2.0}
+            heading = heading_map.get(r_dir, 0.0)
+
+            # Reconcile pose and extend path without wiping history
+            self.odometry.set_pose(x_mm, y_mm, heading, keep_path=True)
+            self.footer.update_pose(x_mm, y_mm, heading)
+            self.sidebar.set_motion_label(f"ARRIVED AT ({rx}, {ry}) [{r_dir}]")
+            self.sidebar.set_note(f"Confirmed encoder cell arrival at ({rx}, {ry}) [{r_dir}]")
+            self.canvas.update()
+            return
+
         # 1. Check for Flood-Fill solver step telemetry from STM32
         step_match = FLOODFILL_STEP_PATTERN.search(line)
         if step_match:
-            step_num, col_s, row_s, dir_ch, action, time_us_s = step_match.groups()
-            col, row = int(col_s), int(row_s)
-            cell_size = self.sidebar.get_cell_distance_mm()
-            x_mm = (col + 0.5) * cell_size
-            y_mm = (row + 0.5) * cell_size
-            heading_map = {"N": 0.0, "E": -math.pi / 2.0, "S": math.pi, "W": math.pi / 2.0}
-            heading = heading_map.get(dir_ch, 0.0)
-            self.odometry.set_pose(x_mm, y_mm, heading)
-            self.odometry.path.append((x_mm, y_mm))
-            self.footer.update_pose(x_mm, y_mm, heading)
-            self.sidebar.set_motion_label(f"STEP {step_num}: {action} ({time_us_s} us)")
-            self.canvas.update()
+            step_num = step_match.group(1)
+            col = int(step_match.group(2))
+            row = int(step_match.group(3))
+            dir_ch = step_match.group(4)
+            action = step_match.group(5)
+            # Update status text only - DO NOT teleport the robot pose before it actually moves!
+            self.sidebar.set_motion_label(f"STEP {step_num}: {action} -> ({col}, {row}) [{dir_ch}]")
             return
 
         if "[GOAL]" in line:
@@ -728,6 +765,12 @@ class OdometryApp(QMainWindow):
         self.footer.update_velocities(v_linear, math.degrees(w_rad))
 
         if moved:
+            if self.canvas.maze is not None:
+                cell_size = self.sidebar.get_cell_distance_mm()
+                cx = int(math.floor(self.odometry.x_mm / cell_size))
+                cy = int(math.floor(self.odometry.y_mm / cell_size))
+                if 0 <= cx < self.canvas.maze.size and 0 <= cy < self.canvas.maze.size:
+                    self.canvas.mark_cell_discovered(cx, cy)
             self.canvas.update()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:

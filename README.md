@@ -1,8 +1,8 @@
-# Blue Pill Micromouse Drive Controller & Embedded Flood-Fill Solver
+# Blue Pill Micromouse Drive Controller & Blind Flood-Fill Solver
 
-STM32CubeIDE firmware, an embedded autonomous flood-fill navigation solver, a PyQt6 2D visualization odometry GUI, a standalone terminal verification tool, and a hold-to-run keyboard utility for a two-wheel differential-drive micromouse built on the **STM32F103C8T6 (Blue Pill)**.
+STM32CubeIDE firmware, an embedded autonomous blind flood-fill navigation solver, a PyQt6 2D visualization odometry GUI with fog-of-war exploration, a standalone terminal verification tool, and a hold-to-run keyboard utility for a two-wheel differential-drive micromouse built on the **STM32F103C8T6 (Blue Pill)**.
 
-The firmware reads quadrature encoders on hardware timers, runs independent 1 kHz PI wheel-speed controllers, executes targeted 1-cell and 90°/180° discrete moves with closed-loop encoder correction and position hold, and embeds a zero-heap C flood-fill maze solver with microsecond timing.
+The firmware reads quadrature encoders on hardware timers, runs independent 1 kHz PI wheel-speed controllers, executes targeted 1-cell and 90°/180° discrete moves with closed-loop encoder correction and position hold, and embeds a zero-heap C flood-fill maze solver navigating blindly cell-by-cell using microsecond timing.
 
 ---
 
@@ -10,41 +10,40 @@ The firmware reads quadrature encoders on hardware timers, runs independent 1 kH
 
 A summary of all features and architectural improvements recently designed, implemented, and verified on the robot:
 
-### 1. Firmware Modularization (`Core/`)
+### 1. Blind Cell-by-Cell Maze Navigation & Physical Motor Actuation
+- **Zero Preloaded Maze Knowledge**: STM32 firmware starts completely blind with only outer boundaries and destination goal centers. Legacy preloaded RAM buffers (`s_ground_truth`), `MAZE_START`, and `WALL` preloading loops were completely removed.
+- **Python Maze Oracle Protocol**:
+  1. Robot requests wall information: `REQ_WALLS <x> <y> <heading>`.
+  2. Python inspects the ground truth and replies with relative walls: `WALLS <front> <left> <right>`.
+  3. Robot updates its internal map, runs the BFS flood-fill gradient solver, and selects the next move.
+  4. Robot drives physical motors via encoder ticks (`CELL_TICKS = 1060`, `TURN_90_TICKS = 692`) or simulated timing.
+  5. Robot confirms arrival at cell boundary: `ARRIVED <x> <y> <heading>`.
+- **Live Motor Execution**: Fully actuates physical wheels in real time during maze navigation (`BLIND_RUN` command or `--motors` flag), allowing the physical micromouse to solve the maze on the floor.
+
+### 2. Fog-of-War Blind GUI Visualization (`gui/canvas.py`)
+- **Undiscovered "Ghost" Walls**: Internal walls in unvisited cells are rendered in faint, translucent ghost color (~20% opacity), visually demonstrating that the robot has no prior map knowledge.
+- **Discovered Solid Walls**: As the robot visits each cell, surrounding walls instantly illuminate in solid competition red (`#ef4444`) and white corner posts (`#f8fafc`).
+- **Territory Illumination**: Visited cell floors light up subtly (`#17232b`) and the top HUD reports real-time exploration coverage (e.g. `Explored: 12/36 cells (33%) [BLIND NAV]`).
+- **Odometry Jump Fix**: Resolved visual jumping by keeping continuous encoder odometry live during motor execution and reconciling pose on arrival with `keep_path=True` without wiping trajectory breadcrumbs.
+
+### 3. Firmware Modularization (`Core/`)
 - **`motor_config.h`**: Centralized hardware pin definitions, encoder CPRs, discrete move tick targets (`CELL_TICKS = 1060`, `TURN_90_TICKS = 692`, `TURN_180_TICKS = 1384`), and 1 kHz PI gains.
-- **`motor_controller.c/.h`**: Modularized low-level hardware actuation, PWM generation on `TIM1`, quadrature encoder sampling on `TIM2`/`TIM3`, 1 kHz speed control loop, and targeted position-hold moves.
-- **`telemetry_cmd.c/.h`**: Decoupled UART command parser (supporting immediate teleop keys and line-based maze protocols) and 100 ms periodic telemetry formatter.
+- **`motor_controller.c/.h`**: Modularized low-level hardware actuation, PWM generation on `TIM1`, quadrature encoder sampling on `TIM2`/`TIM3`, 1 kHz speed control loop with straightness synchronization (`CELL_STRAIGHT_KP = 0.08f`), and targeted position-hold moves.
+- **`telemetry_cmd.c/.h`**: Decoupled UART command parser supporting immediate teleop keys and blind navigation line commands (`BLIND_START`, `BLIND_RUN`), and 100 ms periodic telemetry formatter.
 - **`main.c`**: Lean application entry point (~120 lines total).
 
-### 2. Embedded C Flood-Fill Solver on STM32
+### 4. Embedded C Flood-Fill Solver on STM32
 - **Zero-Heap Navigation Engine**: Fully statically bounded C implementation (`sizeof(MazeMap) = 513` bytes, `sizeof(Navigator) = 517` bytes; zero dynamic allocations / `malloc = 0`).
   - `maze_map.c/.h`: Compact 1-byte-per-cell representation for mazes up to 16x16.
   - `floodfill_core.c/.h`: BFS shortest-path distance gradient solver using static FIFO queue buffers.
   - `sensor_interface.c/.h`: Standardized 3-channel (Front, Left, Right) relative obstacle detection.
   - `navigator.c/.h`: State machine emitting high-level navigation decisions (`MOVE_FORWARD`, `TURN_LEFT`, `TURN_RIGHT`, `TURN_AROUND`, `STOP`).
-  - `mazes.c/.h`: Built-in competition benchmark presets (5x5, 6x6, 10x10, 16x16).
 - **Microsecond Hardware Timing (`floodfill_runner.c/.h`)**:
   - Leverages the ARM Cortex-M3 **72 MHz DWT cycle counter** to time every single navigation step with sub-microsecond precision (~490–510 µs per step).
 
-### 3. UART Maze Upload & Solving Protocol
-- **`MAZE_START <size>`**: Initializes blank maze with outer perimeter walls.
-- **`WALL <x> <y> <N|E|S|W>`**: Dynamically injects internal cell walls into STM32 RAM over UART.
-- **`SOLVE`**: Solves the uploaded maze in firmware and streams live step telemetry.
-- **Standalone Benchmark Keystrokes**: Single-character commands (`'6'`, `'1'`, `'2'`, `'5'`, `'h'`) for running built-in benchmark simulations in any serial terminal without PC-side software.
-
-### 4. Headless Verification Tool (`verify_stm32_floodfill.py`)
-- Standalone CLI script supporting `--maze 6` (default), `--maze 10`, `--maze 16`, `--maze 5`, `--bench`, and `--port COM5`.
-- Reads golden maze layouts from the `FloodFill-Micromouse` submodule, uploads them to the Blue Pill over UART, triggers the solver, streams live steps, and asserts goal arrival and solve success.
-- **Verified on Hardware**: Solved 6x6 maze in 5 steps (dynamic upload) / 19 steps (benchmark mode) with `[STATUS] SUCCESS`.
-
-### 5. PyQt6 Modern GUI Package (`gui/` & `odometry_gui.py`)
-- Rebuilt from legacy Tkinter into a modern, modular PyQt6 application:
-  - `canvas.py`: Hardware-accelerated 2D viewport rendering competition red walls (`#ef4444`), white corner posts (`#f8fafc`), emerald start cell `(0,0)`, purple center goal cells, and real-time robot pose.
-  - `sidebar.py`: Scrollable sidebar with serial connection, geometry calibration, maze environment controls, D-pad WASD teleop, and discrete moves.
-  - `footer.py`: HUD metric cards (Pose, Odometry, Wheel RPM, Raw Encoders).
-  - `serial_worker.py`: Non-blocking background `QThread` serial telemetry reader.
-  - `maze_loader.py`: Submodule bridge importing preset mazes.
-  - **"⚡ Solve on STM32"**: One-click button in GUI that uploads the maze, triggers the STM32 solver, and animates the robot traversing the maze cell-by-cell in real time.
+### 5. Headless Verification Tool (`verify_stm32_floodfill.py`)
+- Standalone CLI script supporting `--maze 6` (default), `--maze 10`, `--maze 16`, `--maze 5`, `--motors`, and `--port COM5`.
+- Functions as the pure Python maze oracle, serving wall queries cell-by-cell and verifying arrival at goal center coordinates.
 
 ---
 
@@ -166,19 +165,19 @@ USART2 uses **115200 baud, 8 data bits, no parity, 1 stop bit**.
 - **`X` / `x` or Space**: Immediate motor stop & cancel active targeted move.
 - **`R` / `r`**: Reset displayed encoder totals.
 
-### 3. Interactive Firmware Benchmarks (Single Key)
-- **`6`**: Run built-in 6x6 maze benchmark simulation.
-- **`1`**: Run built-in 10x10 maze benchmark simulation.
-- **`2`**: Run built-in 16x16 full competition maze benchmark.
-- **`5`**: Run built-in 5x5 maze benchmark simulation.
-- **`h`**: Print firmware interactive help menu.
+### 3. Blind Maze Navigation Commands
+- **`BLIND_START <size>`**: Trigger blind cell-by-cell navigation (simulated encoder ticks).
+- **`BLIND_RUN <size>`**: Trigger blind cell-by-cell navigation with **physical motors driving**.
+- **`'m'` / `'M'`**: Single-key shortcut for 6x6 blind solve with live motors.
+- **`'6'`, `'1'`, `'2'`, `'5'`**: Single-key shortcuts for blind sim solve on 6x6, 10x10, 16x16, 5x5.
+- **`'h'`**: Print firmware interactive help menu.
 
-### 4. Dynamic Maze Upload Protocol (Line-Based)
+### 4. Blind Oracle Handshake Protocol
 ```text
-MAZE_START <size>\r\n         -> STM32 responds: OK: MAZE_INIT <size>
-WALL <x> <y> <N|E|S|W>\r\n    -> STM32 responds: OK: WALL
-SOLVE\r\n                     -> Solves uploaded maze & streams step telemetry
-BENCH <size>\r\n              -> Runs preset benchmark
+Robot -> PC : REQ_WALLS <x> <y> <dir>\r\n    (Requests relative walls for current cell)
+PC -> Robot : WALLS <front> <left> <right>\r\n (1=Wall, 0=Open corridor)
+Robot       : Executes encoder motion (CELL_TICKS / TURN_90_TICKS)
+Robot -> PC : ARRIVED <x> <y> <dir>\r\n      (Confirms completion of cell travel)
 ```
 
 ---
@@ -192,7 +191,7 @@ bluepill_motor_test/
 │   │   ├── motor_config.h        # Calibration, speeds, discrete ticks, PI gains
 │   │   ├── motor_controller.h    # Actuation, encoder sampling, 1 kHz PI loop
 │   │   ├── telemetry_cmd.h       # UART command parser & 100 ms telemetry streamer
-│   │   ├── floodfill_runner.h    # STM32 flood-fill execution harness (DWT timer)
+│   │   ├── floodfill_runner.h    # Blind navigation runner & DWT hardware timer
 │   │   ├── maze_map.h            # Static 513-byte 16x16 maze representation
 │   │   ├── floodfill_core.h      # BFS distance gradient solver (0 heap / zero malloc)
 │   │   ├── navigator.h           # State machine emitting high-level NavCommands
@@ -201,77 +200,78 @@ bluepill_motor_test/
 │   └── Src/
 │       ├── main.c                # Clean application entry point (~120 lines)
 │       ├── motor_controller.c    # 1 kHz PI controller & targeted moves
-│       ├── telemetry_cmd.c       # Teleop & line protocol parser
-│       └── floodfill_runner.c    # Embedded solver execution & telemetry output
+│       ├── telemetry_cmd.c       # Teleop & blind protocol parser
+│       └── floodfill_runner.c    # Blind solver execution & telemetry output
 ├── gui/                          # Modular PyQt6 Desktop Application Package
 │   ├── config.py                 # Palette, constants, QSS stylesheets, regex patterns
 │   ├── kinematics.py             # Differential-drive forward kinematics & dead reckoning
-│   ├── canvas.py                 # QPainter 2D viewport (walls, pegs, start/goal, robot)
+│   ├── canvas.py                 # QPainter 2D viewport (fog-of-war walls, pegs, robot)
 │   ├── sidebar.py                # Serial, geometry, maze controls, WASD & discrete moves
 │   ├── footer.py                 # Real-time HUD metric cards
 │   ├── serial_worker.py          # Background QThread for non-blocking serial telemetry
 │   ├── maze_loader.py            # Submodule bridge loading mazes from FloodFill-Micromouse
-│   └── main_window.py            # Main application window & live solver animation
+│   └── main_window.py            # Main application window & live blind oracle handler
 ├── FloodFill-Micromouse/         # Git Submodule (algorithm core, C lib, Python tests)
 ├── motor_keyboard.py             # Python hold-to-run keyboard utility
 ├── odometry_gui.py               # Main PyQt6 GUI launcher
-└── verify_stm32_floodfill.py     # Standalone CLI maze upload & verification tool
+└── verify_stm32_floodfill.py     # Standalone CLI blind verification tool & maze oracle
 ```
 
 ---
 
 ## Standalone Terminal Verification Tool
 
-[`verify_stm32_floodfill.py`](verify_stm32_floodfill.py) uploads any maze preset from the submodule to the STM32 over UART (**`COM5`** by default), triggers the embedded solver in firmware, streams real-time step telemetry, and verifies that the goal was reached.
+[`verify_stm32_floodfill.py`](verify_stm32_floodfill.py) acts as the maze information provider (oracle) over UART (**`COM5`** by default). The complete maze layout is kept strictly in Python memory—the STM32 discovers it cell-by-cell blindly and reaches the goal center:
 
 ```powershell
-# Dynamic maze upload mode (default 6x6 on COM5)
+# Blind simulation mode (default 6x6 on COM5)
 .\.venv\Scripts\python.exe verify_stm32_floodfill.py --maze 6
 
-# Built-in firmware benchmark mode
-.\.venv\Scripts\python.exe verify_stm32_floodfill.py --maze 6 --bench
+# Blind mode with PHYSICAL MOTOR ACTUATION
+.\.venv\Scripts\python.exe verify_stm32_floodfill.py --maze 6 --motors
 
-# Specify port or other maze sizes
+# Specify port or larger maze sizes
 .\.venv\Scripts\python.exe verify_stm32_floodfill.py --port COM5 --maze 10
 ```
 
 ### Verified Output on Physical Hardware
 ```text
 ==============================================================
-   STM32 Embedded Flood-Fill Solver & Verification Tool       
+   STM32 Micromouse Blind Cell-by-Cell Flood-Fill Tool        
 ==============================================================
 Connecting to STM32 Blue Pill on COM5 @ 115200 baud...
-Loaded maze from submodule: 6x6 (goal centers: [(2,2), (3,2), (2,3), (3,3)])
+Loaded maze in Python: 6x6 (goal centers: [(2, 2), (3, 2), (2, 3), (3, 3)])
 
-[1/3] Uploading 6x6 maze to STM32 (31 cell walls)...
-  ✔ Maze initialized on STM32: 6x6
-  ✔ Successfully uploaded 31 wall specifications to STM32 RAM.
-
-[2/3] Triggering STM32 Flood-Fill Solver ('SOLVE')...
---- Streaming live telemetry from STM32 ---
-  [STEP  1] Pose:( 0, 1) Dir:N | Act:MOVE_FORWARD | Time:493 us
-  [STEP  2] Pose:( 0, 2) Dir:N | Act:MOVE_FORWARD | Time:514 us
-  [STEP  3] Pose:( 1, 2) Dir:E | Act:TURN_RIGHT   | Time:517 us
-  [STEP  4] Pose:( 2, 2) Dir:E | Act:MOVE_FORWARD | Time:514 us
-  [STEP  5] Pose:( 2, 2) Dir:E | Act:STOP         | Time:505 us
-  --------------------------------------------------
-  [GOAL] Reached at (2, 2) in 5 steps!
-  Execution Results:
-  Total Time:       2543 us (2.543 ms)
-  Avg per Step:     508 us
-  Memory Footprint: sizeof(MazeMap)=513 bytes, sizeof(Navigator)=517 bytes
+[1/2] Starting Blind Cell-by-Cell Navigation (6x6, with physical motors)...
+  • Complete maze kept strictly in Python memory (zero walls preloaded to STM32)
+  • Robot requests relative walls (F, L, R) upon arrival at each cell
+--- Live Blind Navigation Handshake ---
+  ➔ [ORACLE] Sensed walls at (0, 0) Dir:N -> Front:0 Left:1 Right:1
+  [STEP 1] Pose:(0, 0) Dir:N | Act:MOVE_FORWARD | Time:492 us
+  >> Motors: Advance 1 cell
+  ✔ [ORACLE] Robot completed encoder travel to cell (0, 1) facing N (Arrival #1)
+  ➔ [ORACLE] Sensed walls at (0, 1) Dir:N -> Front:0 Left:1 Right:0
+  [STEP 2] Pose:(0, 1) Dir:N | Act:MOVE_FORWARD | Time:510 us
+  >> Motors: Advance 1 cell
+  ✔ [ORACLE] Robot completed encoder travel to cell (0, 2) facing N (Arrival #2)
+  ...
+  [GOAL] Reached at (2, 2) in 18 steps!
   [STATUS] SUCCESS
+--- End of Blind Navigation stream ---
 
 ==============================================================
                STM32 VERIFICATION REPORT                      
 ==============================================================
-  Maze Dimension:    6x6
-  Goal Cells:        [(2, 3), (3, 2), (3, 3), (2, 2)]
-  Steps Executed:    5 steps
-  Final Position:    (2, 2) [GOAL]
-  Firmware Status:   SUCCESS
-  STM32 Solve Time:  2543 us (2.543 ms)
-  Avg Time per Step: 508.00 us (Hardware 72 MHz DWT)
+  Maze Dimension:       6x6
+  Navigation Mode:      BLIND (Cell-by-cell relative wall discovery)
+  Goal Cells:           [(2, 3), (3, 2), (3, 3), (2, 2)]
+  Steps Executed:       18 steps
+  Wall Requests Served: 18
+  Arrivals Confirmed:   18
+  Final Position:       (2, 2) [GOAL]
+  Firmware Status:      SUCCESS
+  STM32 Solve Time:     9150 us (9.150 ms)
+  Avg Time per Step:    508.33 us (Hardware 72 MHz DWT)
 ==============================================================
 >>> VERIFICATION PASSED: STM32 FIRMWARE SUCCESSFULLY SOLVED THE MAZE! <<<
 ```
@@ -287,17 +287,18 @@ Launch the desktop GUI:
 ```
 
 ### Features
-1. **Interactive 2D Viewport**:
-   - Competition red walls (`#ef4444`) and white corner posts (`#f8fafc`).
+1. **Interactive 2D Viewport with Fog-of-War**:
+   - **Undiscovered Walls**: Rendered in faint ghost red (~20% alpha) to visualize that the robot is blind.
+   - **Discovered Walls**: Surroundings illuminate in solid competition red (`#ef4444`) and white posts (`#f8fafc`) as cells are visited.
+   - **Illuminated Territory**: Explored cell floors subtly glow (`#17232b`).
    - Emerald green start cell highlight at `(0, 0)`.
    - Purple goal cell highlight for center 2x2 cluster.
-   - Column/row numbers along the outer perimeter.
-   - Smooth robot heading marker and continuous path drawing.
+   - Smooth robot heading marker and continuous path drawing without coordinate jumps.
 2. **MAZE ENVIRONMENT Controls**:
    - **Preset Selector**: Select `6x6 Test Maze`, `Empty 6x6 Maze`, `10x10`, `16x16`.
-   - **Load Maze**: Renders maze layout in the viewport.
-   - **Place at (0,0)**: Places robot at center of start cell `(0, 0)` facing North.
-   - **⚡ Solve on STM32**: Uploads the maze to the STM32 over serial, triggers the embedded solver, and animates each step live on screen!
+   - **Live Motor Movement Checkbox**: Toggle between simulated encoder ticks and physical motor rotation.
+   - **Place at (0,0)**: Places robot at center of start cell `(0, 0)` facing North and resets exploration state.
+   - **⚡ Solve Maze (Blind Navigation)**: Starts blind cell-by-cell navigation where Python acts as the maze oracle!
 3. **Motion & Calibration Controls**:
    - D-Pad for manual teleop (`W`, `A`, `S`, `D`, `X`).
    - Discrete 1-cell moves (`F`, `B`) and turns (`J`, `K`, `U`).

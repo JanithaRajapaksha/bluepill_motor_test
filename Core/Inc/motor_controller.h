@@ -81,6 +81,12 @@ void Motor_Reset_Encoders(void);
 uint8_t Motor_Check_And_Clear_Timeout(void);
 
 /**
+  * @brief  Returns 1 if a targeted move is currently active, 0 otherwise.
+  * @retval 1 if active, 0 otherwise.
+  */
+uint8_t Motor_Is_Move_Active(void);
+
+/**
   * @brief  Copies the latest encoder and speed telemetry into the provided struct.
   * @param  telemetry  Pointer to MotorTelemetry_t destination.
   */

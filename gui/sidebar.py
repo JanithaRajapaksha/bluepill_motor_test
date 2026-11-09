@@ -212,10 +212,15 @@ class SidebarWidget(QScrollArea):
 
         self.btn_solve_maze = QPushButton("⚡ Solve on STM32", sidebar)
         self.btn_solve_maze.setFixedHeight(28)
-        self.btn_solve_maze.setToolTip("Uploads current maze to STM32, runs embedded flood-fill solver, and animates steps")
+        self.btn_solve_maze.setToolTip("Starts blind cell-by-cell maze navigation on STM32")
         self.btn_solve_maze.setStyleSheet("background-color: #1e3a40; border: 1px solid #79e0b5; color: #79e0b5; font-weight: bold;")
         self.btn_solve_maze.clicked.connect(self.solve_maze_requested.emit)
         form_maze.addWidget(self.btn_solve_maze)
+
+        self.chk_drive_motors = QCheckBox("Drive motors in real-time", sidebar)
+        self.chk_drive_motors.setToolTip("When enabled, STM32 physically drives the motors cell-by-cell during solve")
+        self.chk_drive_motors.setStyleSheet("color: #79e0b5; font-size: 11px;")
+        form_maze.addWidget(self.chk_drive_motors)
 
         self.maze_status_lbl = QLabel("Maze: Not loaded", sidebar)
         self.maze_status_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")

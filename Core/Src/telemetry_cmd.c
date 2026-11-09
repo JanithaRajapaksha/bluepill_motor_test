@@ -30,50 +30,25 @@ static void parse_line_command(const char *line)
     return;
   }
 
-  if (strncmp(line, "MAZE_START", 10) == 0)
+  if (strncmp(line, "BLIND_RUN", 9) == 0 || strncmp(line, "RUN", 3) == 0 ||
+      strncmp(line, "DRIVE", 5) == 0)
   {
     unsigned int sz = 6;
-    sscanf(line + 10, "%u", &sz);
-    Floodfill_Runner_Init_Maze((uint8_t)sz);
+    if (strncmp(line, "BLIND_RUN", 9) == 0) sscanf(line + 9, "%u", &sz);
+    else sscanf(line + 3, "%u", &sz);
+    if (sz == 0) sz = 6;
+    Floodfill_Runner_Solve_Blind((uint8_t)sz, true, 250);
   }
-  else if (strncmp(line, "WALL", 4) == 0)
-  {
-    unsigned int x = 0, y = 0;
-    char d_str[16] = {0};
-    if (sscanf(line + 4, "%u %u %15s", &x, &y, d_str) >= 3)
-    {
-      for (int i = 0; d_str[i] != '\0'; ++i)
-      {
-        char ch = d_str[i];
-        if (ch == 'n' || ch == 'N') Floodfill_Runner_Set_Wall(x, y, DIR_NORTH);
-        else if (ch == 'e' || ch == 'E') Floodfill_Runner_Set_Wall(x, y, DIR_EAST);
-        else if (ch == 's' || ch == 'S') Floodfill_Runner_Set_Wall(x, y, DIR_SOUTH);
-        else if (ch == 'w' || ch == 'W') Floodfill_Runner_Set_Wall(x, y, DIR_WEST);
-      }
-      HAL_UART_Transmit(p_huart, (uint8_t *)"OK: WALL\r\n", 10, HAL_MAX_DELAY);
-    }
-    else
-    {
-      HAL_UART_Transmit(p_huart, (uint8_t *)"ERR: Syntax: WALL x y <N|E|S|W>\r\n", 33, HAL_MAX_DELAY);
-    }
-  }
-  else if (strncmp(line, "SOLVE", 5) == 0)
-  {
-    unsigned int sz = 0;
-    if (sscanf(line + 5, "%u", &sz) == 1 && sz > 0)
-    {
-      Floodfill_Runner_Benchmark((uint8_t)sz);
-    }
-    else
-    {
-      Floodfill_Runner_Solve(200);
-    }
-  }
-  else if (strncmp(line, "BENCH", 5) == 0)
+  else if (strncmp(line, "BLIND_START", 11) == 0 || strncmp(line, "BLIND_SOLVE", 11) == 0 ||
+           strncmp(line, "BLIND", 5) == 0 || strncmp(line, "SOLVE", 5) == 0)
   {
     unsigned int sz = 6;
-    sscanf(line + 5, "%u", &sz);
-    Floodfill_Runner_Benchmark((uint8_t)sz);
+    if (strncmp(line, "BLIND_START", 11) == 0) sscanf(line + 11, "%u", &sz);
+    else if (strncmp(line, "BLIND_SOLVE", 11) == 0) sscanf(line + 11, "%u", &sz);
+    else if (strncmp(line, "BLIND", 5) == 0) sscanf(line + 5, "%u", &sz);
+    else if (strncmp(line, "SOLVE", 5) == 0) sscanf(line + 5, "%u", &sz);
+    if (sz == 0) sz = 6;
+    Floodfill_Runner_Solve_Blind((uint8_t)sz, false, 250);
   }
   else if (strncmp(line, "HELP", 4) == 0 || strcmp(line, "H") == 0 || strcmp(line, "?") == 0)
   {
@@ -104,9 +79,9 @@ void Telemetry_Send_Startup_Banner(void)
   }
 
   static const uint8_t banner_msg[] =
-    "\r\n=== Micromouse BluePill Ready ===\r\n"
-    "Flood-Fill: '6'=6x6, '1'=10x10, '2'=16x16, 'h'=menu\r\n"
-    "Upload: MAZE_START <sz>, WALL x y <dirs>, SOLVE\r\n"
+    "\r\n=== Micromouse BluePill Ready (Blind Navigation) ===\r\n"
+    "Blind Flood-Fill: '6'=6x6, '1'=10x10, '2'=16x16, 'm'=6x6 Live Motors, 'h'=menu\r\n"
+    "Commands: BLIND <sz>, BLIND_RUN <sz>\r\n"
     "Teleop: W/S/A/D, F=1cell fwd, B=1cell rev, J=90L, K=90R, U=180, X=stop, R=reset\r\n\r\n";
 
   HAL_UART_Transmit(p_huart, (uint8_t *)banner_msg,
@@ -143,19 +118,24 @@ void Telemetry_Cmd_Process(void)
       switch (key)
       {
         case '6':
-          Floodfill_Runner_Benchmark(6);
+          Floodfill_Runner_Solve_Blind(6, false, 250);
           return;
 
         case '1':
-          Floodfill_Runner_Benchmark(10);
+          Floodfill_Runner_Solve_Blind(10, false, 250);
           return;
 
         case '2':
-          Floodfill_Runner_Benchmark(16);
+          Floodfill_Runner_Solve_Blind(16, false, 250);
           return;
 
         case '5':
-          Floodfill_Runner_Benchmark(5);
+          Floodfill_Runner_Solve_Blind(5, false, 250);
+          return;
+
+        case 'm':
+        case 'M':
+          Floodfill_Runner_Solve_Blind(6, true, 250);
           return;
 
         case 'h':

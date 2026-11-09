@@ -12,7 +12,7 @@ TELEMETRY_PATTERN = re.compile(
 
 # Flood-Fill step telemetry regex from STM32 solver
 FLOODFILL_STEP_PATTERN = re.compile(
-    r"\[STEP\s+(\d+)\]\s+Pose:\(\s*(\d+),\s*(\d+)\)\s+Dir:([NESW])\s+\|\s+Act:(\S+)\s+\|\s+Time:(\d+)\s*us"
+    r"\[STEP\s+(\d+)\]\s+Pose:\(\s*(\d+),\s*(\d+)\)\s+Dir:([NESW])\s+\|\s+Act:(\S+)"
 )
 
 # Color theme
@@ -32,12 +32,14 @@ GRID_COLOR = "#233338"
 AXIS_COLOR = "#3d575c"
 
 # Maze visualization colors
-MAZE_WALL_COLOR = "#ef4444"      # Competition red walls
-MAZE_POST_COLOR = "#f8fafc"      # White corner posts
-MAZE_FLOOR_BG = "#10181e"        # Maze floor area
-MAZE_START_BG = "#133528"        # Subtle emerald green highlight for cell (0,0)
-MAZE_GOAL_BG = "#2a1e38"         # Subtle indigo/violet highlight for center goal cells
-MAZE_LABEL_COLOR = "#64748b"     # Coordinates / cell markers
+MAZE_WALL_COLOR = "#ef4444"               # Solid competition red for discovered walls
+MAZE_WALL_UNDISCOVERED_COLOR = "#3b1e22"  # Faint dimmed ghost color for unvisited walls
+MAZE_POST_COLOR = "#f8fafc"               # White corner posts for discovered area
+MAZE_FLOOR_BG = "#10181e"                 # Maze floor area (unexplored)
+MAZE_DISCOVERED_BG = "#17232b"            # Subtle illuminated floor for explored cells
+MAZE_START_BG = "#133528"                 # Subtle emerald green highlight for cell (0,0)
+MAZE_GOAL_BG = "#2a1e38"                  # Subtle indigo/violet highlight for center goal cells
+MAZE_LABEL_COLOR = "#64748b"              # Coordinates / cell markers
 
 # Default hardware & motion geometry
 DEFAULT_LEFT_CPR = 815.70

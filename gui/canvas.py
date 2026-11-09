@@ -17,12 +17,14 @@ from gui.config import (
     BG_CANVAS,
     DEFAULT_CELL_SIZE_MM,
     GRID_COLOR,
+    MAZE_DISCOVERED_BG,
     MAZE_FLOOR_BG,
     MAZE_GOAL_BG,
     MAZE_LABEL_COLOR,
     MAZE_POST_COLOR,
     MAZE_START_BG,
     MAZE_WALL_COLOR,
+    MAZE_WALL_UNDISCOVERED_COLOR,
     TEXT_MUTED,
     TEXT_PRIMARY,
 )
@@ -39,6 +41,7 @@ class OdometryCanvas(QWidget):
         self.odometry: Optional[DifferentialDriveOdometry] = None
         self.cell_size_mm = DEFAULT_CELL_SIZE_MM
         self.maze: Optional[Any] = None
+        self.discovered_cells: set[tuple[int, int]] = {(0, 0)}
 
     def set_odometry(self, odometry: Optional[DifferentialDriveOdometry]) -> None:
         """Sets the active odometry kinematic model."""
@@ -48,6 +51,18 @@ class OdometryCanvas(QWidget):
     def set_maze(self, maze: Optional[Any]) -> None:
         """Sets the active Micromouse maze grid."""
         self.maze = maze
+        self.reset_discovered()
+        self.update()
+
+    def mark_cell_discovered(self, x: int, y: int) -> None:
+        """Marks a cell as discovered/visited during blind maze navigation."""
+        if (x, y) not in self.discovered_cells:
+            self.discovered_cells.add((x, y))
+            self.update()
+
+    def reset_discovered(self) -> None:
+        """Resets discovered cells back to starting cell (0, 0)."""
+        self.discovered_cells = {(0, 0)}
         self.update()
 
     def set_cell_size(self, cell_size_mm: float) -> None:
@@ -182,7 +197,7 @@ class OdometryCanvas(QWidget):
         )
         painter.fillRect(floor_rect, QColor(MAZE_FLOOR_BG))
 
-        # 2. Highlight special cells (Start (0,0) and Center Goal cells)
+        # 2. Highlight special cells & discovered territory
         centers: set[tuple[int, int]] = set()
         try:
             centers = {(c.x, c.y) for c in self.maze.get_centers()}
@@ -211,6 +226,9 @@ class OdometryCanvas(QWidget):
                     painter.fillRect(c_rect, QColor(MAZE_GOAL_BG))
                     painter.setPen(QColor("#c084fc"))
                     painter.drawText(c_rect, Qt.AlignmentFlag.AlignCenter, "GOAL")
+                elif (col, row) in self.discovered_cells:
+                    # Subtle illuminated floor for discovered territory
+                    painter.fillRect(c_rect, QColor(MAZE_DISCOVERED_BG))
 
         # 3. Axis coordinate markers along bottom and left borders
         painter.setPen(QColor(MAZE_LABEL_COLOR))
@@ -228,11 +246,18 @@ class OdometryCanvas(QWidget):
                 lbl_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, str(row)
             )
 
-        # 4. Maze walls
+        # 4. Maze walls (Blind Navigation representation)
+        # Undiscovered walls are faint ("less color"), discovered walls are solid bright red
         wall_width = max(2.5, min(5.5, scale * 3.0))
-        wall_pen = QPen(QColor(MAZE_WALL_COLOR), wall_width)
-        wall_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(wall_pen)
+        solid_pen = QPen(QColor(MAZE_WALL_COLOR), wall_width)
+        solid_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+
+        # Faint ghost pen for undiscovered internal walls (20% opacity)
+        ghost_pen = QPen(QColor(239, 68, 68, 50), max(1.5, wall_width * 0.75))
+        ghost_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+
+        solid_lines: list[tuple[QPointF, QPointF]] = []
+        ghost_lines: list[tuple[QPointF, QPointF]] = []
 
         for row_cells in self.maze.cells:
             for cell in row_cells:
@@ -242,34 +267,70 @@ class OdometryCanvas(QWidget):
                 p_nw_c = screen(cx * cell_size, (cy + 1) * cell_size)
                 p_ne_c = screen((cx + 1) * cell_size, (cy + 1) * cell_size)
 
+                # Horizontal walls (South and top-most North)
                 if cell.is_south_wall:
-                    painter.drawLine(p_sw_c, p_se_c)
-                if cell.is_north_wall:
-                    painter.drawLine(p_nw_c, p_ne_c)
+                    line = (p_sw_c, p_se_c)
+                    if cy == 0 or (cx, cy) in self.discovered_cells or (cx, cy - 1) in self.discovered_cells:
+                        solid_lines.append(line)
+                    else:
+                        ghost_lines.append(line)
+
+                if cy == size - 1 and cell.is_north_wall:
+                    solid_lines.append((p_nw_c, p_ne_c))
+
+                # Vertical walls (West and right-most East)
                 if cell.is_west_wall:
-                    painter.drawLine(p_sw_c, p_nw_c)
-                if cell.is_east_wall:
-                    painter.drawLine(p_se_c, p_ne_c)
+                    line = (p_sw_c, p_nw_c)
+                    if cx == 0 or (cx, cy) in self.discovered_cells or (cx - 1, cy) in self.discovered_cells:
+                        solid_lines.append(line)
+                    else:
+                        ghost_lines.append(line)
+
+                if cx == size - 1 and cell.is_east_wall:
+                    solid_lines.append((p_se_c, p_ne_c))
+
+        # Pass 1: Draw undiscovered "ghost" walls first
+        painter.setPen(ghost_pen)
+        for p1, p2 in ghost_lines:
+            painter.drawLine(p1, p2)
+
+        # Pass 2: Draw discovered solid walls on top
+        painter.setPen(solid_pen)
+        for p1, p2 in solid_lines:
+            painter.drawLine(p1, p2)
 
         # 5. Corner posts (pegs)
         post_rad = max(2.0, min(4.5, scale * 2.0))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(MAZE_POST_COLOR))
         for col in range(size + 1):
             for row in range(size + 1):
                 pt = screen(col * cell_size, row * cell_size)
-                painter.drawEllipse(pt, post_rad, post_rad)
+                touched = (
+                    col == 0 or col == size or row == 0 or row == size
+                    or any((col + dx, row + dy) in self.discovered_cells for dx in (-1, 0) for dy in (-1, 0))
+                )
+                if touched:
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor(MAZE_POST_COLOR))
+                    painter.drawEllipse(pt, post_rad, post_rad)
+                else:
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor(148, 163, 184, 50))
+                    painter.drawEllipse(pt, max(1.5, post_rad * 0.7), max(1.5, post_rad * 0.7))
 
     def _draw_hud(self, painter: QPainter, width: int, _height: int) -> None:
-        """Top HUD overlay showing cell dimensions, active maze, and sample stats."""
+        """Top HUD overlay showing cell dimensions, active maze, exploration stats, and sample stats."""
         painter.setPen(QColor(TEXT_MUTED))
         font = QFont("Segoe UI", 9, QFont.Weight.DemiBold)
         painter.setFont(font)
 
         if self.maze is not None:
+            total_cells = self.maze.size * self.maze.size
+            disc_count = len(self.discovered_cells)
+            pct = (disc_count / total_cells) * 100.0 if total_cells > 0 else 0.0
             left_info = (
                 f"MAZE: {self.maze.size}x{self.maze.size} "
-                f"({self.cell_size_mm:.1f} mm/Cell)  ·  Start at Cell (0,0)"
+                f"({self.cell_size_mm:.1f} mm/Cell)  ·  "
+                f"Explored: {disc_count}/{total_cells} cells ({pct:.0f}%) [BLIND NAV]"
             )
         else:
             left_info = f"PATH / CELL GRID ({self.cell_size_mm:.1f} mm = 1 Cell)"

@@ -301,6 +301,11 @@ uint8_t Motor_Check_And_Clear_Timeout(void)
   return 0U;
 }
 
+uint8_t Motor_Is_Move_Active(void)
+{
+  return cell_move_active;
+}
+
 void Motor_Get_Telemetry(MotorTelemetry_t *telemetry)
 {
   if (telemetry == NULL)

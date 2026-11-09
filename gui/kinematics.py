@@ -54,14 +54,24 @@ class DifferentialDriveOdometry:
         self.last_counts = None
         self.last_time = None
 
-    def set_pose(self, x_mm: float, y_mm: float, heading_rad: float = 0.0) -> None:
-        """Sets the current pose and starts a new path."""
+    def set_pose(
+        self,
+        x_mm: float,
+        y_mm: float,
+        heading_rad: float = 0.0,
+        keep_path: bool = False,
+    ) -> None:
+        """Sets the current pose. If keep_path is True, preserves and extends path history."""
         self.x_mm = x_mm
         self.y_mm = y_mm
         self.heading_rad = heading_rad
         self.linear_speed_mm_s = 0.0
         self.angular_speed_rad_s = 0.0
-        self.path = [(x_mm, y_mm)]
+        if keep_path:
+            if not self.path or abs(self.path[-1][0] - x_mm) > 0.5 or abs(self.path[-1][1] - y_mm) > 0.5:
+                self.path.append((x_mm, y_mm))
+        else:
+            self.path = [(x_mm, y_mm)]
 
     def update_counts(
         self, left_count: int, right_count: int, timestamp: float | None = None
@@ -79,6 +89,10 @@ class DifferentialDriveOdometry:
         left_delta = left_count - self.last_counts[0]
         right_delta = right_count - self.last_counts[1]
         self.last_counts = current_counts
+
+        # Reject corrupt or unaligned huge single-frame encoder deltas (> 1500 counts in 100 ms)
+        if abs(left_delta) > 1500 or abs(right_delta) > 1500:
+            return False
 
         dt = (timestamp - self.last_time) if self.last_time else 0.1
         self.last_time = timestamp
