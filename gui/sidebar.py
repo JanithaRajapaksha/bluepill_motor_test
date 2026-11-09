@@ -57,6 +57,7 @@ class SidebarWidget(QScrollArea):
     load_maze_requested = pyqtSignal(str)
     place_robot_origin_requested = pyqtSignal()
     clear_maze_requested = pyqtSignal()
+    solve_maze_requested = pyqtSignal()
 
     cell_size_changed = pyqtSignal(float)
 
@@ -208,6 +209,13 @@ class SidebarWidget(QScrollArea):
         maze_btn_box.addWidget(self.btn_load_maze)
         maze_btn_box.addWidget(self.btn_place_start)
         form_maze.addLayout(maze_btn_box)
+
+        self.btn_solve_maze = QPushButton("⚡ Solve on STM32", sidebar)
+        self.btn_solve_maze.setFixedHeight(28)
+        self.btn_solve_maze.setToolTip("Uploads current maze to STM32, runs embedded flood-fill solver, and animates steps")
+        self.btn_solve_maze.setStyleSheet("background-color: #1e3a40; border: 1px solid #79e0b5; color: #79e0b5; font-weight: bold;")
+        self.btn_solve_maze.clicked.connect(self.solve_maze_requested.emit)
+        form_maze.addWidget(self.btn_solve_maze)
 
         self.maze_status_lbl = QLabel("Maze: Not loaded", sidebar)
         self.maze_status_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")

@@ -36,6 +36,7 @@ from gui.config import (
     DEFAULT_RIGHT_CPR,
     DEFAULT_TRACK_WIDTH_MM,
     DEFAULT_WHEEL_DIAMETER_MM,
+    FLOODFILL_STEP_PATTERN,
     TELEMETRY_PATTERN,
     get_app_stylesheet,
 )
@@ -180,6 +181,7 @@ class OdometryApp(QMainWindow):
         sb.load_maze_requested.connect(self._on_load_maze)
         sb.place_robot_origin_requested.connect(self.place_robot_at_cell_0_0)
         sb.clear_maze_requested.connect(self._on_clear_maze)
+        sb.solve_maze_requested.connect(self._on_solve_maze_clicked)
 
     def _refresh_ports(self) -> None:
         self.sidebar.port_combo.clear()
@@ -560,6 +562,60 @@ class OdometryApp(QMainWindow):
         self.sidebar.set_motion_label("PLACED AT CELL (0,0)")
         self.canvas.update()
 
+    def _on_solve_maze_clicked(self) -> None:
+        """Uploads current maze to STM32 and triggers embedded flood-fill solver."""
+        if self.connection is None or not self.connection.is_open:
+            QMessageBox.information(
+                self,
+                "Not Connected",
+                "Please connect to the STM32 Blue Pill on COM port (e.g. COM5) before solving.",
+            )
+            return
+
+        if self.canvas.maze is None:
+            self._on_load_maze("6x6 Test Maze")
+
+        self.place_robot_at_cell_0_0()
+        self.sidebar.set_motion_label("SOLVING ON STM32...")
+        self.sidebar.set_maze_status("Solving maze with embedded flood-fill...")
+
+        # Run upload and solve in a quick background thread to avoid blocking GUI
+        threading.Thread(target=self._upload_and_solve_worker, daemon=True).start()
+
+    def _upload_and_solve_worker(self) -> None:
+        try:
+            from verify_stm32_floodfill import extract_internal_walls
+
+            maze = self.canvas.maze
+            if maze is None or self.connection is None:
+                return
+
+            size = maze.size
+            walls = extract_internal_walls(maze)
+
+            # 1. Send MAZE_START
+            with self.write_lock:
+                if self.connection and self.connection.is_open:
+                    self.connection.write(f"MAZE_START {size}\r\n".encode("ascii"))
+            time.sleep(0.06)
+
+            # 2. Upload internal walls
+            for x, y, dirs in walls:
+                with self.write_lock:
+                    if self.connection and self.connection.is_open:
+                        self.connection.write(f"WALL {x} {y} {dirs}\r\n".encode("ascii"))
+                time.sleep(0.015)
+
+            time.sleep(0.06)
+
+            # 3. Trigger SOLVE
+            with self.write_lock:
+                if self.connection and self.connection.is_open:
+                    self.connection.write(b"SOLVE\r\n")
+
+        except Exception as exc:
+            print("Solve worker error:", exc)
+
     def _send_encoder_reset(self) -> None:
         if self.connection is None:
             self.reset_stage = None
@@ -577,6 +633,42 @@ class OdometryApp(QMainWindow):
         self.sidebar.set_note(f"Serial Error: {message}")
 
     def _on_telemetry_line(self, line: str) -> None:
+        # 1. Check for Flood-Fill solver step telemetry from STM32
+        step_match = FLOODFILL_STEP_PATTERN.search(line)
+        if step_match:
+            step_num, col_s, row_s, dir_ch, action, time_us_s = step_match.groups()
+            col, row = int(col_s), int(row_s)
+            cell_size = self.sidebar.get_cell_distance_mm()
+            x_mm = (col + 0.5) * cell_size
+            y_mm = (row + 0.5) * cell_size
+            heading_map = {"N": 0.0, "E": -math.pi / 2.0, "S": math.pi, "W": math.pi / 2.0}
+            heading = heading_map.get(dir_ch, 0.0)
+            self.odometry.set_pose(x_mm, y_mm, heading)
+            self.odometry.path.append((x_mm, y_mm))
+            self.footer.update_pose(x_mm, y_mm, heading)
+            self.sidebar.set_motion_label(f"STEP {step_num}: {action} ({time_us_s} us)")
+            self.canvas.update()
+            return
+
+        if "[GOAL]" in line:
+            self.sidebar.set_motion_label("GOAL REACHED! [SUCCESS]")
+            self.sidebar.set_maze_status("Goal reached successfully!")
+            self.canvas.update()
+            return
+
+        if "[STATUS] SUCCESS" in line:
+            self.sidebar.set_motion_label("SOLVE SUCCESS")
+            self.sidebar.set_maze_status("Maze solved on STM32!")
+            self.canvas.update()
+            return
+
+        if "[STATUS] FAILED" in line or "[FAILED]" in line:
+            self.sidebar.set_motion_label("SOLVE FAILED")
+            self.sidebar.set_maze_status("Solve failed on STM32")
+            self.canvas.update()
+            return
+
+        # 2. Check for standard motor PID telemetry
         match = TELEMETRY_PATTERN.search(line)
         if match is None:
             return

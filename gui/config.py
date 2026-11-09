@@ -10,6 +10,11 @@ TELEMETRY_PATTERN = re.compile(
     r"R:(-?\d+)\s+d:(-?\d+)\s+RPM:(-?\d+)\s+PWM:(\d+)"
 )
 
+# Flood-Fill step telemetry regex from STM32 solver
+FLOODFILL_STEP_PATTERN = re.compile(
+    r"\[STEP\s+(\d+)\]\s+Pose:\(\s*(\d+),\s*(\d+)\)\s+Dir:([NESW])\s+\|\s+Act:(\S+)\s+\|\s+Time:(\d+)\s*us"
+)
+
 # Color theme
 BG_DARK = "#0c1316"
 BG_CANVAS = "#0e171a"
