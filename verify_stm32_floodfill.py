@@ -7,8 +7,9 @@ over UART (default: COM5), triggers the embedded flood-fill solver in firmware,
 streams real-time step telemetry, and verifies that the goal was successfully reached.
 
 Usage:
-    python verify_stm32_floodfill.py [--port COM5] [--baud 115200] [--maze 6x6]
-    python verify_stm32_floodfill.py --bench 6
+    python verify_stm32_floodfill.py [--port COM5] [--baud 115200] [--maze 6]
+    python verify_stm32_floodfill.py --maze 6
+    python verify_stm32_floodfill.py --maze 6 --bench
 """
 
 from __future__ import annotations
@@ -66,31 +67,43 @@ def get_default_port() -> str:
     return "COM5"
 
 
-def load_maze(preset: str = "6x6") -> Any:
+def normalize_maze_preset(preset: str | int) -> str:
+    """Normalizes preset input (e.g. 6, '6', '6x6', '6X6') to clean dimension string ('6')."""
+    s = str(preset).strip().lower()
+    if "x" in s:
+        s = s.split("x")[0].strip()
+    return s
+
+
+def load_maze(preset: str | int = "6") -> Any:
     """Loads a preset maze from the FloodFill-Micromouse submodule."""
     if not SUBMODULE_LOADED:
         raise RuntimeError(
             "Could not load FloodFill-Micromouse submodule. Ensure FloodFill-Micromouse/floodfill_py exists."
         )
 
-    if preset in ("6", "6x6"):
+    norm = normalize_maze_preset(preset)
+
+    if norm == "6":
         maze = ff_cell.create_empty_maze(6)
         ff_mazes.wall_arrangement_x6(maze)
         return maze
-    elif preset in ("10", "10x10"):
+    elif norm == "10":
         maze = ff_cell.create_empty_maze(10)
         ff_mazes.wall_arrangement_10x10(maze)
         return maze
-    elif preset in ("16", "16x16"):
+    elif norm == "16":
         maze = ff_cell.create_empty_maze(16)
         ff_mazes.wall_arrangement_16x16(maze)
         return maze
-    elif preset in ("5", "5x5"):
+    elif norm == "5":
         maze = ff_cell.create_empty_maze(5)
         ff_mazes.wall_arrangement_x5(maze)
         return maze
     else:
-        raise ValueError(f"Unsupported maze preset: {preset}. Choices: 5x5, 6x6, 10x10, 16x16")
+        raise ValueError(
+            f"Unsupported maze preset: '{preset}'. Choices: 6 (or 6x6), 10 (or 10x10), 16 (or 16x16), 5 (or 5x5)"
+        )
 
 
 def extract_internal_walls(maze: Any) -> list[tuple[int, int, str]]:
@@ -305,9 +318,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--maze",
-        default="6x6",
-        choices=["5x5", "6x6", "10x10", "16x16", "5", "6", "10", "16"],
-        help="Maze preset to upload and solve (default: 6x6)",
+        default="6",
+        choices=["6", "10", "16", "5", "6x6", "10x10", "16x16", "5x5"],
+        help="Maze dimension/preset to upload and solve: 6 (default), 10, 16, 5 (or 6x6, 10x10, etc.)",
     )
     parser.add_argument(
         "--bench",
