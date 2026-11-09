@@ -44,6 +44,7 @@ from gui.footer import FooterWidget
 from gui.kinematics import DifferentialDriveOdometry
 from gui.serial_worker import SerialReaderWorker
 from gui.sidebar import SidebarWidget
+from navigation_engine import NavigationEngine, query_cell_relative_walls
 
 
 class OdometryApp(QMainWindow):
@@ -77,6 +78,15 @@ class OdometryApp(QMainWindow):
             DEFAULT_WHEEL_DIAMETER_MM,
             DEFAULT_TRACK_WIDTH_MM,
         )
+
+        # Unified Navigation Engine (shared directly with verify_stm32_floodfill.py)
+        self.nav_engine = NavigationEngine()
+        self.nav_engine.on_wall_request = self._on_engine_wall_request
+        self.nav_engine.on_cell_arrival = self._on_engine_cell_arrival
+        self.nav_engine.on_step = self._on_engine_step
+        self.nav_engine.on_goal = self._on_engine_goal
+        self.nav_engine.on_status = self._on_engine_status
+        self.nav_engine.on_telemetry = self._on_engine_telemetry
 
         self.reset_stage: Optional[str] = None
         self.reset_deadline = 0.0
@@ -441,9 +451,9 @@ class OdometryApp(QMainWindow):
         self.sidebar.set_motion_label("1 CELL FORWARD [F]")
         if self.connection is None or not self.connection.is_open:
             d = self.sidebar.get_cell_distance_mm()
-            self.odometry.x_mm += -d * math.sin(self.odometry.heading_rad)
-            self.odometry.y_mm += d * math.cos(self.odometry.heading_rad)
-            self.odometry.path.append((self.odometry.x_mm, self.odometry.y_mm))
+            dx = -d * math.sin(self.odometry.heading_rad)
+            dy = d * math.cos(self.odometry.heading_rad)
+            self.odometry.displace(dx, dy)
             self.footer.update_pose(
                 self.odometry.x_mm, self.odometry.y_mm, self.odometry.heading_rad
             )
@@ -456,9 +466,9 @@ class OdometryApp(QMainWindow):
         self.sidebar.set_motion_label("1 CELL BACKWARD [B]")
         if self.connection is None or not self.connection.is_open:
             d = self.sidebar.get_cell_distance_mm()
-            self.odometry.x_mm -= -d * math.sin(self.odometry.heading_rad)
-            self.odometry.y_mm -= d * math.cos(self.odometry.heading_rad)
-            self.odometry.path.append((self.odometry.x_mm, self.odometry.y_mm))
+            dx = -d * math.sin(self.odometry.heading_rad)
+            dy = d * math.cos(self.odometry.heading_rad)
+            self.odometry.displace(-dx, -dy)
             self.footer.update_pose(
                 self.odometry.x_mm, self.odometry.y_mm, self.odometry.heading_rad
             )
@@ -470,11 +480,7 @@ class OdometryApp(QMainWindow):
         self.send_command("j")
         self.sidebar.set_motion_label("TURN 90° LEFT [J]")
         if self.connection is None or not self.connection.is_open:
-            new_heading = self.odometry.heading_rad + (math.pi / 2.0)
-            self.odometry.heading_rad = math.atan2(
-                math.sin(new_heading), math.cos(new_heading)
-            )
-            self.odometry.path.append((self.odometry.x_mm, self.odometry.y_mm))
+            self.odometry.rotate(math.pi / 2.0)
             self.footer.update_pose(
                 self.odometry.x_mm, self.odometry.y_mm, self.odometry.heading_rad
             )
@@ -486,11 +492,7 @@ class OdometryApp(QMainWindow):
         self.send_command("k")
         self.sidebar.set_motion_label("TURN 90° RIGHT [K]")
         if self.connection is None or not self.connection.is_open:
-            new_heading = self.odometry.heading_rad - (math.pi / 2.0)
-            self.odometry.heading_rad = math.atan2(
-                math.sin(new_heading), math.cos(new_heading)
-            )
-            self.odometry.path.append((self.odometry.x_mm, self.odometry.y_mm))
+            self.odometry.rotate(-math.pi / 2.0)
             self.footer.update_pose(
                 self.odometry.x_mm, self.odometry.y_mm, self.odometry.heading_rad
             )
@@ -502,11 +504,7 @@ class OdometryApp(QMainWindow):
         self.send_command("u")
         self.sidebar.set_motion_label("TURN 180° [U]")
         if self.connection is None or not self.connection.is_open:
-            new_heading = self.odometry.heading_rad + math.pi
-            self.odometry.heading_rad = math.atan2(
-                math.sin(new_heading), math.cos(new_heading)
-            )
-            self.odometry.path.append((self.odometry.x_mm, self.odometry.y_mm))
+            self.odometry.rotate(math.pi)
             self.footer.update_pose(
                 self.odometry.x_mm, self.odometry.y_mm, self.odometry.heading_rad
             )
@@ -542,6 +540,7 @@ class OdometryApp(QMainWindow):
 
             maze = maze_loader.load_preset(preset_name)
             self.canvas.set_maze(maze)
+            self.nav_engine.set_maze(maze)
             self.sidebar.set_maze_status(f"Active: {preset_name} ({maze.size}x{maze.size})")
             self.place_robot_at_cell_0_0()
         except Exception as exc:
@@ -551,6 +550,7 @@ class OdometryApp(QMainWindow):
     def _on_clear_maze(self) -> None:
         """Clears the active maze from the canvas."""
         self.canvas.set_maze(None)
+        self.nav_engine.set_maze(None)
         self.sidebar.set_maze_status("Maze: None")
         self.canvas.update()
 
@@ -560,6 +560,7 @@ class OdometryApp(QMainWindow):
         x0 = cell_size * 0.5
         y0 = cell_size * 0.5
         self.odometry.reset(x0, y0, heading_rad=0.0)
+        self.nav_engine.reset()
         self.footer.update_pose(x0, y0, 0.0)
         self.sidebar.set_motion_label("PLACED AT CELL (0,0)")
         self.canvas.reset_discovered()
@@ -594,7 +595,6 @@ class OdometryApp(QMainWindow):
             if maze is None or self.connection is None:
                 return
 
-            size = maze.size
             cell_size = self.sidebar.get_cell_distance_mm()
             x0 = cell_size * 0.5
             y0 = cell_size * 0.5
@@ -609,14 +609,11 @@ class OdometryApp(QMainWindow):
                         self.connection.write(b"r\r\n")
                 time.sleep(0.08)
 
-            # Blind navigation: NO walls are uploaded to STM32. Complete maze stays strictly in Python.
-            cmd = f"BLIND_RUN {size}\r\n".encode("ascii") if drive_motors else f"BLIND_START {size}\r\n".encode("ascii")
+            # Unified Engine generates the blind solve command
+            cmd = self.nav_engine.start_solve(maze, with_motors=drive_motors)
             with self.write_lock:
                 if self.connection and self.connection.is_open:
-                    self.connection.write(cmd)
-
-        except Exception as exc:
-            print("Solve worker error:", exc)
+                    self.connection.write(cmd.encode("ascii"))
 
         except Exception as exc:
             print("Solve worker error:", exc)
@@ -632,85 +629,67 @@ class OdometryApp(QMainWindow):
             else:
                 self.reset_stage = None
 
-    # Telemetry Line Receiver
-    def _on_serial_error(self, message: str) -> None:
-        self.disconnect_serial(send_stop=False)
-        self.sidebar.set_note(f"Serial Error: {message}")
+    # ------------------------------------------------------------------
+    # Unified Navigation Engine Event Callbacks
+    # ------------------------------------------------------------------
+    def _on_engine_wall_request(
+        self, rx: int, ry: int, r_dir: str, f: int, l: int, r: int
+    ) -> None:
+        self.canvas.mark_cell_discovered(rx, ry)
+        self.sidebar.set_note(f"Oracle: Supplied walls for ({rx},{ry}) {r_dir} -> F:{f} L:{l} R:{r}")
 
-    def _on_telemetry_line(self, line: str) -> None:
-        # Check for Blind Navigation Wall Requests from Robot
-        if line.startswith("REQ_WALLS"):
-            parts = line.split()
-            rx = int(parts[1]) if len(parts) > 1 else 0
-            ry = int(parts[2]) if len(parts) > 2 else 0
-            r_dir = parts[3].upper() if len(parts) > 3 else "N"
-            self.canvas.mark_cell_discovered(rx, ry)
-            if self.canvas.maze is not None:
-                from verify_stm32_floodfill import query_cell_relative_walls
-                f, l, r = query_cell_relative_walls(self.canvas.maze, rx, ry, r_dir)
-                with self.write_lock:
-                    if self.connection and self.connection.is_open:
-                        self.connection.write(f"WALLS {f} {l} {r}\r\n".encode("ascii"))
-                self.sidebar.set_note(f"Oracle: Supplied walls for ({rx},{ry}) {r_dir} -> F:{f} L:{l} R:{r}")
-            return
+    def _on_engine_cell_arrival(self, rx: int, ry: int, r_dir: str) -> None:
+        self.canvas.mark_cell_discovered(rx, ry)
 
-        # Check for Blind Navigation Cell Arrival Confirmation
-        if line.startswith("ARRIVED"):
-            parts = line.split()
-            rx = int(parts[1]) if len(parts) > 1 else 0
-            ry = int(parts[2]) if len(parts) > 2 else 0
-            r_dir = parts[3].upper() if len(parts) > 3 else "N"
-            self.canvas.mark_cell_discovered(rx, ry)
+        cardinal_angles = {"N": 0.0, "E": -math.pi / 2.0, "S": math.pi, "W": math.pi / 2.0}
+        target_heading = cardinal_angles.get(r_dir.upper(), 0.0)
+
+        if not self.nav_engine.with_motors:
+            # Simulation mode: no wheel encoder counts occur, so advance kinematic pose
+            # cell-by-cell along the path so the canvas draws the true maze path.
             cell_size = self.sidebar.get_cell_distance_mm()
-            x_mm = (rx + 0.5) * cell_size
-            y_mm = (ry + 0.5) * cell_size
-            heading_map = {"N": 0.0, "E": -math.pi / 2.0, "S": math.pi, "W": math.pi / 2.0}
-            heading = heading_map.get(r_dir, 0.0)
+            target_x = (rx + 0.5) * cell_size
+            target_y = (ry + 0.5) * cell_size
+            self.odometry.set_pose(target_x, target_y, target_heading, keep_path=True)
+            self.odometry.imu.reset(target_heading)
+        else:
+            # Live motors mode: wheel encoders continuously track physical movement.
+            # On cell arrival, align simulated IMU reference to the cardinal heading
+            # and fuse it through EKF to correct yaw drift without artificial position snapping.
+            self.odometry.imu.set_cardinal_reference(r_dir)
+            imu_yaw = self.odometry.imu.get_yaw_measurement()
+            self.odometry.update_imu_yaw(imu_yaw)
 
-            # Reconcile pose and extend path without wiping history
-            self.odometry.set_pose(x_mm, y_mm, heading, keep_path=True)
-            self.footer.update_pose(x_mm, y_mm, heading)
-            self.sidebar.set_motion_label(f"ARRIVED AT ({rx}, {ry}) [{r_dir}]")
-            self.sidebar.set_note(f"Confirmed encoder cell arrival at ({rx}, {ry}) [{r_dir}]")
-            self.canvas.update()
-            return
+        # Update HUD cards and UI labels
+        self.footer.update_pose(
+            self.odometry.x_mm, self.odometry.y_mm, self.odometry.heading_rad
+        )
+        self.sidebar.set_motion_label(f"ARRIVED AT ({rx}, {ry}) [{r_dir}]")
+        self.sidebar.set_note(
+            f"Pose: ({self.odometry.x_mm:.1f}, {self.odometry.y_mm:.1f}) Yaw: {math.degrees(self.odometry.heading_rad):.1f}° [EKF Fused]"
+        )
+        self.canvas.update()
 
-        # 1. Check for Flood-Fill solver step telemetry from STM32
-        step_match = FLOODFILL_STEP_PATTERN.search(line)
-        if step_match:
-            step_num = step_match.group(1)
-            col = int(step_match.group(2))
-            row = int(step_match.group(3))
-            dir_ch = step_match.group(4)
-            action = step_match.group(5)
-            # Update status text only - DO NOT teleport the robot pose before it actually moves!
-            self.sidebar.set_motion_label(f"STEP {step_num}: {action} -> ({col}, {row}) [{dir_ch}]")
-            return
+    def _on_engine_step(self, step_dict: dict[str, Any]) -> None:
+        self.sidebar.set_motion_label(
+            f"STEP {step_dict['step_num']}: {step_dict['action']} -> ({step_dict['col']}, {step_dict['row']}) [{step_dict['dir']}]"
+        )
 
-        if "[GOAL]" in line:
-            self.sidebar.set_motion_label("GOAL REACHED! [SUCCESS]")
-            self.sidebar.set_maze_status("Goal reached successfully!")
-            self.canvas.update()
-            return
+    def _on_engine_motor_action(self, line: str) -> None:
+        self.sidebar.set_note(line)
 
-        if "[STATUS] SUCCESS" in line:
-            self.sidebar.set_motion_label("SOLVE SUCCESS")
-            self.sidebar.set_maze_status("Maze solved on STM32!")
-            self.canvas.update()
-            return
+    def _on_engine_goal(self, coords: tuple[int, int]) -> None:
+        self.sidebar.set_motion_label("GOAL REACHED! [SUCCESS]")
+        self.sidebar.set_maze_status("Goal reached successfully!")
+        self.canvas.update()
 
-        if "[STATUS] FAILED" in line or "[FAILED]" in line:
-            self.sidebar.set_motion_label("SOLVE FAILED")
-            self.sidebar.set_maze_status("Solve failed on STM32")
-            self.canvas.update()
-            return
+    def _on_engine_status(self, success: bool, msg: str) -> None:
+        status_text = "SOLVE SUCCESS" if success else "SOLVE FAILED"
+        self.sidebar.set_motion_label(status_text)
+        self.sidebar.set_maze_status(f"Maze solve status: {msg}")
+        self.canvas.update()
 
-        # 2. Check for standard motor PID telemetry
-        match = TELEMETRY_PATTERN.search(line)
-        if match is None:
-            return
-
-        parsed = tuple(int(v) for v in match.groups())
+    def _on_engine_telemetry(self, parsed: tuple[int, ...]) -> None:
         self.telemetry = parsed
         (
             left_count,
@@ -754,7 +733,6 @@ class OdometryApp(QMainWindow):
             self.odometry.x_mm, self.odometry.y_mm, self.odometry.heading_rad
         )
 
-        # Compute kinematic linear and angular speeds from filtered RPM
         circumference = self.odometry.wheel_circumference_mm
         track = self.odometry.track_width_mm
         v_l = (left_rpm / 60.0) * circumference
@@ -772,6 +750,19 @@ class OdometryApp(QMainWindow):
                 if 0 <= cx < self.canvas.maze.size and 0 <= cy < self.canvas.maze.size:
                     self.canvas.mark_cell_discovered(cx, cy)
             self.canvas.update()
+
+    # Telemetry Line Receiver
+    def _on_serial_error(self, message: str) -> None:
+        self.disconnect_serial(send_stop=False)
+        self.sidebar.set_note(f"Serial Error: {message}")
+
+    def _on_telemetry_line(self, line: str) -> None:
+        """Processes line through the unified NavigationEngine and dispatches responses."""
+        response = self.nav_engine.process_line(line)
+        if response is not None:
+            with self.write_lock:
+                if self.connection and self.connection.is_open:
+                    self.connection.write(response.encode("ascii"))
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.disconnect_serial()

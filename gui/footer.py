@@ -22,8 +22,8 @@ class FooterWidget(QFrame):
         layout.setContentsMargins(14, 8, 14, 8)
         layout.setSpacing(10)
 
-        self.pos_val = self._create_card(layout, "POSITION / mm", "X 0.0   Y 0.0")
-        self.heading_val = self._create_card(layout, "HEADING", "0.0° [N]")
+        self.pos_val = self._create_card(layout, "POSITION (EKF)", "X 0.0   Y 0.0")
+        self.heading_val = self._create_card(layout, "YAW (IMU / EKF)", "0.0° [N]")
         self.v_val = self._create_card(layout, "LINEAR SPEED (v)", "0.0 mm/s")
         self.w_val = self._create_card(layout, "ANGULAR SPEED (ω)", "0.0 °/s")
         self.encoders_val = self._create_card(layout, "ENCODERS (L / R)", "0 / 0")
