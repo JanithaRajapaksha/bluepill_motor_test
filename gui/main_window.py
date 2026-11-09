@@ -105,8 +105,8 @@ class OdometryApp(QMainWindow):
 
         self._setup_style()
         self._build_ui()
-        self._refresh_ports()
         self._on_load_maze("6x6 Test Maze")
+        self._refresh_ports(auto_connect=True)
 
     def _setup_style(self) -> None:
         self.setStyleSheet(get_app_stylesheet())
@@ -193,17 +193,26 @@ class OdometryApp(QMainWindow):
         sb.clear_maze_requested.connect(self._on_clear_maze)
         sb.solve_maze_requested.connect(self._on_solve_maze_clicked)
 
-    def _refresh_ports(self) -> None:
+    def _refresh_ports(self, auto_connect: bool = True) -> None:
         self.sidebar.port_combo.clear()
         ports = [port.device for port in list_ports.comports()]
         if ports:
             self.sidebar.port_combo.addItems(ports)
+            if "COM5" in ports:
+                idx = self.sidebar.port_combo.findText("COM5")
+                if idx >= 0:
+                    self.sidebar.port_combo.setCurrentIndex(idx)
             self.sidebar.set_note("Detected ports: " + ", ".join(ports))
         else:
             self.sidebar.port_combo.addItem("COM5")
             self.sidebar.set_note("No active COM ports detected. Enter manually.")
 
-    def connect_serial(self) -> None:
+        # Automatically connect COM5 if available and not already connected
+        if auto_connect and (self.connection is None or not self.connection.is_open):
+            if "COM5" in ports:
+                self.connect_serial(silent_fail=True)
+
+    def connect_serial(self, silent_fail: bool = False) -> None:
         try:
             left_cpr, right_cpr, wheel_dia, track_w, cell_size = (
                 self.sidebar.get_geometry()
@@ -212,7 +221,10 @@ class OdometryApp(QMainWindow):
             port = self.sidebar.port_combo.currentText().strip()
             conn = serial.Serial(port, baud, timeout=0.1, write_timeout=0.5)
         except (ValueError, serial.SerialException) as exc:
-            QMessageBox.critical(self, "Connection Failed", str(exc))
+            if not silent_fail:
+                QMessageBox.critical(self, "Connection Failed", str(exc))
+            else:
+                self.sidebar.set_note(f"Auto-connect to {port} skipped: {exc}")
             return
 
         self.odometry = DifferentialDriveOdometry(
