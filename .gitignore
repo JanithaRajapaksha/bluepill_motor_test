@@ -2,6 +2,8 @@
 /Release/
 /build/
 /.metadata/
+/.venv/
+__pycache__/
 
 *.elf
 *.hex
@@ -9,3 +11,4 @@
 *.map
 *.list
 *.su
+*.py[cod]

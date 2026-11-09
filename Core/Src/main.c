@@ -33,6 +33,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define MOTOR_CONTROL_DUTY 300U
 
 /* USER CODE END PD */
 
@@ -54,6 +55,8 @@ static int32_t right_encoder_total = 0;
 static uint16_t left_encoder_previous = 0;
 static uint16_t right_encoder_previous = 0;
 static uint32_t encoder_report_tick = 0;
+static int8_t left_motor_command = 0;
+static int8_t right_motor_command = 0;
 
 /* USER CODE END PV */
 
@@ -65,11 +68,50 @@ static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
+static void Set_Motor_Speed(int8_t left_command, int8_t right_command);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void Set_Motor_Speed(int8_t left_command, int8_t right_command)
+{
+  if (left_command > 0)
+  {
+    HAL_GPIO_WritePin(GPIOB, AIN1_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOB, AIN2_Pin, GPIO_PIN_SET);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, MOTOR_CONTROL_DUTY);
+  }
+  else if (left_command < 0)
+  {
+    HAL_GPIO_WritePin(GPIOB, AIN1_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOB, AIN2_Pin, GPIO_PIN_RESET);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, MOTOR_CONTROL_DUTY);
+  }
+  else
+  {
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
+    HAL_GPIO_WritePin(GPIOB, AIN1_Pin | AIN2_Pin, GPIO_PIN_RESET);
+  }
+
+  if (right_command > 0)
+  {
+    HAL_GPIO_WritePin(GPIOB, BIN1_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOB, BIN2_Pin, GPIO_PIN_SET);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, MOTOR_CONTROL_DUTY);
+  }
+  else if (right_command < 0)
+  {
+    HAL_GPIO_WritePin(GPIOB, BIN1_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOB, BIN2_Pin, GPIO_PIN_RESET);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, MOTOR_CONTROL_DUTY);
+  }
+  else
+  {
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
+    HAL_GPIO_WritePin(GPIOB, BIN1_Pin | BIN2_Pin, GPIO_PIN_RESET);
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -117,6 +159,21 @@ int main(void)
   left_encoder_previous = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
   right_encoder_previous = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
 
+  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK ||
+      HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  HAL_GPIO_WritePin(GPIOB, STBY_Pin, GPIO_PIN_SET);
+  Set_Motor_Speed(0, 0);
+  {
+    static const uint8_t controls_message[] =
+        "Keys: W=forward S=reverse A=left D=right Space/X=stop R=reset counts\r\n";
+    HAL_UART_Transmit(&huart2, (uint8_t *)controls_message,
+                      sizeof(controls_message) - 1U, HAL_MAX_DELAY);
+  }
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -126,6 +183,52 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    uint8_t key;
+
+    if (HAL_UART_Receive(&huart2, &key, 1, 0) == HAL_OK)
+    {
+      switch (key)
+      {
+        case 'w':
+        case 'W':
+          left_motor_command = 1;
+          right_motor_command = 1;
+          break;
+        case 's':
+        case 'S':
+          left_motor_command = -1;
+          right_motor_command = -1;
+          break;
+        case 'a':
+        case 'A':
+          left_motor_command = -1;
+          right_motor_command = 1;
+          break;
+        case 'd':
+        case 'D':
+          left_motor_command = 1;
+          right_motor_command = -1;
+          break;
+        case 'x':
+        case 'X':
+        case ' ':
+          left_motor_command = 0;
+          right_motor_command = 0;
+          break;
+        case 'r':
+        case 'R':
+          left_encoder_total = 0;
+          right_encoder_total = 0;
+          left_encoder_previous = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+          right_encoder_previous = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+          encoder_report_tick = HAL_GetTick();
+          break;
+        default:
+          break;
+      }
+      Set_Motor_Speed(left_motor_command, right_motor_command);
+    }
+
     if ((HAL_GetTick() - encoder_report_tick) >= 100U)
     {
       uint16_t left_encoder_current = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
