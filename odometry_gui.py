@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -232,7 +233,7 @@ class OdometryCanvas(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.odometry: Optional[DifferentialDriveOdometry] = None
-        self.cell_size_mm = 180.0
+        self.cell_size_mm = 134.7
 
     def set_odometry(self, odometry: Optional[DifferentialDriveOdometry]) -> None:
         self.odometry = odometry
@@ -316,7 +317,7 @@ class OdometryCanvas(QWidget):
         painter.setPen(QColor(TEXT_MUTED))
         font = QFont("Segoe UI", 9, QFont.Weight.DemiBold)
         painter.setFont(font)
-        painter.drawText(20, 26, f"PATH / CELL GRID ({self.cell_size_mm:.0f} mm)")
+        painter.drawText(20, 26, f"PATH / CELL GRID ({self.cell_size_mm:.1f} mm = 1 Cell)")
 
         # Display heading formatted (e.g. 0° North, L 30°, R 30°)
         deg = math.degrees(heading)
@@ -468,6 +469,10 @@ class OdometryApp(QMainWindow):
 
         self._setup_style()
         self._build_ui()
+        self.odometry = DifferentialDriveOdometry(815.70, 815.55, 33.0, 112.0)
+        self.canvas.set_odometry(self.odometry)
+        self.canvas.set_cell_size(134.7)
+        self._set_controls_enabled(True)
         self._refresh_ports()
 
     def _setup_style(self) -> None:
@@ -484,9 +489,30 @@ class OdometryApp(QMainWindow):
                 background-color: {BG_DARK};
                 border-bottom: 1px solid {BORDER};
             }}
-            QFrame#sidebar {{
+            QScrollArea#sidebarScroll {{
                 background-color: {BG_PANEL};
+                border: none;
                 border-right: 1px solid {BORDER};
+            }}
+            QWidget#sidebar {{
+                background-color: {BG_PANEL};
+            }}
+            QScrollBar:vertical {{
+                border: none;
+                background: {BG_DARK};
+                width: 6px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {BORDER};
+                min-height: 25px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {ACCENT_MINT};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
             }}
             QFrame#footer {{
                 background-color: {BG_PANEL};
@@ -523,7 +549,8 @@ class OdometryApp(QMainWindow):
                 color: {TEXT_PRIMARY};
                 border: 1px solid {BORDER};
                 border-radius: 4px;
-                padding: 5px 8px;
+                padding: 3px 8px;
+                min-height: 24px;
             }}
             QLineEdit:focus, QComboBox:focus {{
                 border: 1px solid {ACCENT_MINT};
@@ -626,11 +653,18 @@ class OdometryApp(QMainWindow):
         b_layout.setContentsMargins(0, 0, 0, 0)
         b_layout.setSpacing(0)
 
-        sidebar = QFrame(body)
+        scroll_area = QScrollArea(body)
+        scroll_area.setObjectName("sidebarScroll")
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFixedWidth(330)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(310)
         self._build_sidebar(sidebar)
-        b_layout.addWidget(sidebar)
+        scroll_area.setWidget(sidebar)
+        b_layout.addWidget(scroll_area)
 
         right_panel = QWidget(body)
         rp_layout = QVBoxLayout(right_panel)
@@ -649,9 +683,9 @@ class OdometryApp(QMainWindow):
         b_layout.addWidget(right_panel, stretch=1)
         root_layout.addWidget(body, stretch=1)
 
-    def _build_sidebar(self, sidebar: QFrame) -> None:
+    def _build_sidebar(self, sidebar: QWidget) -> None:
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
         # --- SERIAL LINK ---
@@ -664,30 +698,34 @@ class OdometryApp(QMainWindow):
         form1.setHorizontalSpacing(8)
 
         lbl_port = QLabel("COM port", sidebar)
-        lbl_port.setStyleSheet(f"color: {TEXT_MUTED};")
+        lbl_port.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
         self.port_combo = QComboBox(sidebar)
         self.port_combo.setEditable(True)
+        self.port_combo.setFixedHeight(28)
         form1.addWidget(lbl_port, 0, 0)
         form1.addWidget(self.port_combo, 0, 1)
 
         lbl_baud = QLabel("Baud rate", sidebar)
-        lbl_baud.setStyleSheet(f"color: {TEXT_MUTED};")
+        lbl_baud.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
         self.baud_edit = QLineEdit("115200", sidebar)
+        self.baud_edit.setFixedHeight(28)
         form1.addWidget(lbl_baud, 1, 0)
         form1.addWidget(self.baud_edit, 1, 1)
         layout.addLayout(form1)
 
         link_btns = QHBoxLayout()
         self.refresh_btn = QPushButton("Find ports", sidebar)
+        self.refresh_btn.setFixedHeight(28)
         self.refresh_btn.clicked.connect(self._refresh_ports)
         self.connect_btn = QPushButton("Connect", sidebar)
+        self.connect_btn.setFixedHeight(28)
         self.connect_btn.setObjectName("actionBtn")
         self.connect_btn.clicked.connect(self.toggle_connection)
         link_btns.addWidget(self.refresh_btn)
         link_btns.addWidget(self.connect_btn)
         layout.addLayout(link_btns)
 
-        layout.addSpacing(4)
+        layout.addSpacing(2)
 
         # --- ROBOT GEOMETRY ---
         sec2 = QLabel("ROBOT GEOMETRY", sidebar)
@@ -695,37 +733,60 @@ class OdometryApp(QMainWindow):
         layout.addWidget(sec2)
 
         form2 = QGridLayout()
-        form2.setVerticalSpacing(5)
+        form2.setVerticalSpacing(6)
         form2.setHorizontalSpacing(8)
+        form2.setColumnStretch(0, 0)
+        form2.setColumnStretch(1, 1)
 
         self.left_cpr_edit = QLineEdit("815.70", sidebar)
+        self.left_cpr_edit.setFixedHeight(28)
         self.right_cpr_edit = QLineEdit("815.55", sidebar)
+        self.right_cpr_edit.setFixedHeight(28)
         self.wheel_diam_edit = QLineEdit("33", sidebar)  # Default 33 mm
+        self.wheel_diam_edit.setFixedHeight(28)
         self.track_width_edit = QLineEdit("112", sidebar)  # Default 112 mm
-        self.cell_size_edit = QLineEdit("180", sidebar)
+        self.track_width_edit.setFixedHeight(28)
 
-        form2.addWidget(QLabel("Left CPR", sidebar), 0, 0)
+        cell_box = QHBoxLayout()
+        cell_box.setSpacing(6)
+        cell_box.setContentsMargins(0, 0, 0, 0)
+        self.cell_size_edit = QLineEdit("134.7", sidebar)
+        self.cell_size_edit.setFixedHeight(28)
+        self.cell_size_edit.textChanged.connect(self._on_cell_size_changed)
+        btn_calc_cell = QPushButton("Calc (F)", sidebar)
+        btn_calc_cell.setFixedHeight(28)
+        btn_calc_cell.setToolTip("Calculate 1 cell distance (1060 ticks) from CPR & wheel diameter")
+        btn_calc_cell.setStyleSheet("padding: 3px 6px; font-size: 11px;")
+        btn_calc_cell.clicked.connect(self._recalculate_cell_size)
+        cell_box.addWidget(self.cell_size_edit, stretch=1)
+        cell_box.addWidget(btn_calc_cell)
+
+        lbl_lcpr = QLabel("Left CPR:", sidebar)
+        lbl_rcpr = QLabel("Right CPR:", sidebar)
+        lbl_wdia = QLabel("Wheel dia (mm):", sidebar)
+        lbl_tw = QLabel("Track (mm):", sidebar)
+        lbl_cg = QLabel("Cell grid (mm):", sidebar)
+
+        for lbl in (lbl_lcpr, lbl_rcpr, lbl_wdia, lbl_tw, lbl_cg):
+            lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
+
+        form2.addWidget(lbl_lcpr, 0, 0)
         form2.addWidget(self.left_cpr_edit, 0, 1)
-        form2.addWidget(QLabel("Right CPR", sidebar), 1, 0)
+        form2.addWidget(lbl_rcpr, 1, 0)
         form2.addWidget(self.right_cpr_edit, 1, 1)
-        form2.addWidget(QLabel("Wheel dia / mm", sidebar), 2, 0)
+        form2.addWidget(lbl_wdia, 2, 0)
         form2.addWidget(self.wheel_diam_edit, 2, 1)
-        form2.addWidget(QLabel("Track width / mm", sidebar), 3, 0)
+        form2.addWidget(lbl_tw, 3, 0)
         form2.addWidget(self.track_width_edit, 3, 1)
-        form2.addWidget(QLabel("Cell grid / mm", sidebar), 4, 0)
-        form2.addWidget(self.cell_size_edit, 4, 1)
-
-        for i in range(5):
-            lbl = form2.itemAtPosition(i, 0).widget()
-            if lbl:
-                lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
+        form2.addWidget(lbl_cg, 4, 0)
+        form2.addLayout(cell_box, 4, 1)
 
         layout.addLayout(form2)
 
-        layout.addSpacing(4)
+        layout.addSpacing(2)
 
-        # --- MOTION CONTROLS ---
-        sec3 = QLabel("MOTION CONTROLS", sidebar)
+        # --- CONTINUOUS TELEOP ---
+        sec3 = QLabel("CONTINUOUS DRIVE (WASD)", sidebar)
         sec3.setObjectName("sectionHeader")
         layout.addWidget(sec3)
 
@@ -736,7 +797,7 @@ class OdometryApp(QMainWindow):
         sc_layout.setSpacing(2)
         lbl_s_tag = QLabel("MOTION STATE", state_card)
         lbl_s_tag.setObjectName("metricTitle")
-        self.motion_state_lbl = QLabel("IDLE / DISCONNECTED", state_card)
+        self.motion_state_lbl = QLabel("READY / STOPPED [X]", state_card)
         self.motion_state_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
         self.motion_state_lbl.setStyleSheet(f"color: {ACCENT_MINT};")
         sc_layout.addWidget(lbl_s_tag)
@@ -749,25 +810,30 @@ class OdometryApp(QMainWindow):
 
         self.btn_fwd = QPushButton("▲ W", sidebar)
         self.btn_fwd.setObjectName("dpadBtn")
+        self.btn_fwd.setFixedHeight(30)
         self.btn_fwd.pressed.connect(lambda: self._handle_dpad_press("w"))
         self.btn_fwd.released.connect(lambda: self._handle_dpad_release("w"))
 
         self.btn_left = QPushButton("◀ A", sidebar)
         self.btn_left.setObjectName("dpadBtn")
+        self.btn_left.setFixedHeight(30)
         self.btn_left.pressed.connect(lambda: self._handle_dpad_press("a"))
         self.btn_left.released.connect(lambda: self._handle_dpad_release("a"))
 
         self.btn_stop = QPushButton("■ STOP", sidebar)
         self.btn_stop.setObjectName("stopBtn")
+        self.btn_stop.setFixedHeight(30)
         self.btn_stop.clicked.connect(self._manual_stop)
 
         self.btn_right = QPushButton("▶ D", sidebar)
         self.btn_right.setObjectName("dpadBtn")
+        self.btn_right.setFixedHeight(30)
         self.btn_right.pressed.connect(lambda: self._handle_dpad_press("d"))
         self.btn_right.released.connect(lambda: self._handle_dpad_release("d"))
 
         self.btn_rev = QPushButton("▼ S", sidebar)
         self.btn_rev.setObjectName("dpadBtn")
+        self.btn_rev.setFixedHeight(30)
         self.btn_rev.pressed.connect(lambda: self._handle_dpad_press("s"))
         self.btn_rev.released.connect(lambda: self._handle_dpad_release("s"))
 
@@ -778,23 +844,58 @@ class OdometryApp(QMainWindow):
         dpad.addWidget(self.btn_rev, 2, 1)
         layout.addLayout(dpad)
 
-        # Cell and Reset
-        aux_row = QHBoxLayout()
-        self.btn_cell = QPushButton("1 Cell (F)", sidebar)
-        self.btn_cell.clicked.connect(self._action_cell)
-        self.btn_reset = QPushButton("Reset Pose (R)", sidebar)
-        self.btn_reset.clicked.connect(self.reset_pose_and_encoders)
-        aux_row.addWidget(self.btn_cell)
-        aux_row.addWidget(self.btn_reset)
-        layout.addLayout(aux_row)
-
         self.hold_to_drive_check = QCheckBox("Hold-to-run (stop on key release)", sidebar)
         self.hold_to_drive_check.setChecked(True)
         layout.addWidget(self.hold_to_drive_check)
 
+        layout.addSpacing(2)
+
+        # --- DISCRETE MOTIONS ---
+        sec4 = QLabel("DISCRETE MOTIONS", sidebar)
+        sec4.setObjectName("sectionHeader")
+        layout.addWidget(sec4)
+
+        disc_grid = QGridLayout()
+        disc_grid.setSpacing(4)
+
+        self.btn_cell_fwd = QPushButton("▲ 1 Cell Fwd (F)", sidebar)
+        self.btn_cell_fwd.setFixedHeight(30)
+        self.btn_cell_fwd.clicked.connect(self._action_cell_forward)
+
+        self.btn_cell_back = QPushButton("▼ 1 Cell Back (B)", sidebar)
+        self.btn_cell_back.setFixedHeight(30)
+        self.btn_cell_back.clicked.connect(self._action_cell_backward)
+
+        self.btn_turn_90_l = QPushButton("↶ 90° Left (J)", sidebar)
+        self.btn_turn_90_l.setFixedHeight(30)
+        self.btn_turn_90_l.clicked.connect(self._action_turn_90_left)
+
+        self.btn_turn_90_r = QPushButton("↷ 90° Right (K)", sidebar)
+        self.btn_turn_90_r.setFixedHeight(30)
+        self.btn_turn_90_r.clicked.connect(self._action_turn_90_right)
+
+        self.btn_turn_180 = QPushButton("↺ Turn 180° (U)", sidebar)
+        self.btn_turn_180.setFixedHeight(30)
+        self.btn_turn_180.clicked.connect(self._action_turn_180)
+
+        self.btn_reset = QPushButton("⟲ Reset (R)", sidebar)
+        self.btn_reset.setFixedHeight(30)
+        self.btn_reset.clicked.connect(self.reset_pose_and_encoders)
+
+        disc_grid.addWidget(self.btn_cell_fwd, 0, 0)
+        disc_grid.addWidget(self.btn_cell_back, 0, 1)
+        disc_grid.addWidget(self.btn_turn_90_l, 1, 0)
+        disc_grid.addWidget(self.btn_turn_90_r, 1, 1)
+        disc_grid.addWidget(self.btn_turn_180, 2, 0)
+        disc_grid.addWidget(self.btn_reset, 2, 1)
+        layout.addLayout(disc_grid)
+
         hint = QLabel(
-            "Keys: W/S move · A=Left · D=Right · Space/X=Stop · F=Cell · R=Reset\n"
-            "Lift key to stop instantly (teleop keyboard style).",
+            "Controls:\n"
+            "• W/S/A/D: teleop drive (lift key to stop)\n"
+            "• F: 1 Cell Fwd · B: 1 Cell Back\n"
+            "• J: Turn 90° Left · K: Turn 90° Right · U: Turn 180°\n"
+            "• Space/X: Stop · R: Reset origin",
             sidebar,
         )
         hint.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px; line-height: 14px;")
@@ -808,7 +909,7 @@ class OdometryApp(QMainWindow):
         self.link_note.setWordWrap(True)
         layout.addWidget(self.link_note)
 
-        self._set_controls_enabled(False)
+        self._set_controls_enabled(True)
 
     def _build_footer(self, footer: QFrame) -> None:
         layout = QHBoxLayout(footer)
@@ -844,7 +945,11 @@ class OdometryApp(QMainWindow):
         self.btn_left.setEnabled(enabled)
         self.btn_right.setEnabled(enabled)
         self.btn_stop.setEnabled(enabled)
-        self.btn_cell.setEnabled(enabled)
+        self.btn_cell_fwd.setEnabled(enabled)
+        self.btn_cell_back.setEnabled(enabled)
+        self.btn_turn_90_l.setEnabled(enabled)
+        self.btn_turn_90_r.setEnabled(enabled)
+        self.btn_turn_180.setEnabled(enabled)
         self.btn_reset.setEnabled(enabled)
 
     def _refresh_ports(self) -> None:
@@ -978,7 +1083,19 @@ class OdometryApp(QMainWindow):
             self._manual_stop()
 
         elif key == Qt.Key.Key_F:
-            self._action_cell()
+            self._action_cell_forward()
+
+        elif key == Qt.Key.Key_B:
+            self._action_cell_backward()
+
+        elif key in (Qt.Key.Key_J, Qt.Key.Key_BracketLeft):
+            self._action_turn_90_left()
+
+        elif key in (Qt.Key.Key_K, Qt.Key.Key_BracketRight):
+            self._action_turn_90_right()
+
+        elif key == Qt.Key.Key_U:
+            self._action_turn_180()
 
         elif key == Qt.Key.Key_R:
             self.reset_pose_and_encoders()
@@ -1125,11 +1242,103 @@ class OdometryApp(QMainWindow):
         self.held_movement_keys.clear()
         self._process_movement_keys()
 
-    def _action_cell(self) -> None:
+    def _get_cell_distance_mm(self) -> float:
+        try:
+            return float(self.cell_size_edit.text().strip())
+        except ValueError:
+            return 134.7
+
+    def _compute_cell_distance_mm(self) -> float:
+        try:
+            lcpr = float(self.left_cpr_edit.text().strip())
+            rcpr = float(self.right_cpr_edit.text().strip())
+            wdia = float(self.wheel_diam_edit.text().strip())
+            avg_cpr = (lcpr + rcpr) * 0.5
+            if avg_cpr > 0:
+                return (1060.0 / avg_cpr) * math.pi * wdia
+        except (ValueError, ZeroDivisionError):
+            pass
+        return 134.7
+
+    def _recalculate_cell_size(self) -> None:
+        dist = self._compute_cell_distance_mm()
+        self.cell_size_edit.setText(f"{dist:.1f}")
+        self.canvas.set_cell_size(dist)
+
+    def _on_cell_size_changed(self, text: str) -> None:
+        try:
+            val = float(text.strip())
+            if val > 1.0:
+                self.canvas.set_cell_size(val)
+        except ValueError:
+            pass
+
+    def _action_cell_forward(self) -> None:
         self.held_movement_keys.clear()
         self._process_movement_keys()
         self.send_command("f")
-        self.motion_state_lbl.setText("CELL MOVE [F]")
+        self.motion_state_lbl.setText("1 CELL FORWARD [F]")
+        if self.connection is None or not self.connection.is_open:
+            if self.odometry is not None:
+                d = self._get_cell_distance_mm()
+                self.odometry.x_mm += -d * math.sin(self.odometry.heading_rad)
+                self.odometry.y_mm += d * math.cos(self.odometry.heading_rad)
+                self.odometry.path.append((self.odometry.x_mm, self.odometry.y_mm))
+                self._update_pose_labels()
+                self.canvas.update()
+
+    def _action_cell_backward(self) -> None:
+        self.held_movement_keys.clear()
+        self._process_movement_keys()
+        self.send_command("b")
+        self.motion_state_lbl.setText("1 CELL BACKWARD [B]")
+        if self.connection is None or not self.connection.is_open:
+            if self.odometry is not None:
+                d = self._get_cell_distance_mm()
+                self.odometry.x_mm -= -d * math.sin(self.odometry.heading_rad)
+                self.odometry.y_mm -= d * math.cos(self.odometry.heading_rad)
+                self.odometry.path.append((self.odometry.x_mm, self.odometry.y_mm))
+                self._update_pose_labels()
+                self.canvas.update()
+
+    def _action_turn_90_left(self) -> None:
+        self.held_movement_keys.clear()
+        self._process_movement_keys()
+        self.send_command("j")
+        self.motion_state_lbl.setText("TURN 90° LEFT [J]")
+        if self.connection is None or not self.connection.is_open:
+            if self.odometry is not None:
+                new_heading = self.odometry.heading_rad + (math.pi / 2.0)
+                self.odometry.heading_rad = math.atan2(math.sin(new_heading), math.cos(new_heading))
+                self.odometry.path.append((self.odometry.x_mm, self.odometry.y_mm))
+                self._update_pose_labels()
+                self.canvas.update()
+
+    def _action_turn_90_right(self) -> None:
+        self.held_movement_keys.clear()
+        self._process_movement_keys()
+        self.send_command("k")
+        self.motion_state_lbl.setText("TURN 90° RIGHT [K]")
+        if self.connection is None or not self.connection.is_open:
+            if self.odometry is not None:
+                new_heading = self.odometry.heading_rad - (math.pi / 2.0)
+                self.odometry.heading_rad = math.atan2(math.sin(new_heading), math.cos(new_heading))
+                self.odometry.path.append((self.odometry.x_mm, self.odometry.y_mm))
+                self._update_pose_labels()
+                self.canvas.update()
+
+    def _action_turn_180(self) -> None:
+        self.held_movement_keys.clear()
+        self._process_movement_keys()
+        self.send_command("u")
+        self.motion_state_lbl.setText("TURN 180° [U]")
+        if self.connection is None or not self.connection.is_open:
+            if self.odometry is not None:
+                new_heading = self.odometry.heading_rad + math.pi
+                self.odometry.heading_rad = math.atan2(math.sin(new_heading), math.cos(new_heading))
+                self.odometry.path.append((self.odometry.x_mm, self.odometry.y_mm))
+                self._update_pose_labels()
+                self.canvas.update()
 
     def reset_pose_and_encoders(self) -> None:
         self.held_movement_keys.clear()

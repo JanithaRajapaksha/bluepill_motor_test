@@ -39,6 +39,8 @@
 #define MOTOR_CURVE_SLOW_RPM 60.0f
 #define MOTOR_CURVE_FAST_RPM 150.0f
 #define CELL_TICKS 1060L
+#define TURN_90_TICKS 692L
+#define TURN_180_TICKS 1384L
 #define CELL_SLOWDOWN_TICKS 250L
 #define CELL_MIN_APPROACH_RPM 60.0f
 #define CELL_STRAIGHT_KP 0.08f
@@ -95,6 +97,10 @@ static volatile int32_t left_cell_start = 0;
 static volatile int32_t right_cell_start = 0;
 static volatile int32_t left_cell_target = 0;
 static volatile int32_t right_cell_target = 0;
+static volatile int8_t left_target_move_dir = 0;
+static volatile int8_t right_target_move_dir = 0;
+static volatile int32_t left_target_move_total = 0;
+static volatile int32_t right_target_move_total = 0;
 static volatile uint32_t cell_move_start_tick = 0;
 static volatile float left_target_rpm = MOTOR_TARGET_RPM;
 static volatile float right_target_rpm = MOTOR_TARGET_RPM;
@@ -115,6 +121,7 @@ static uint16_t Update_Motor_PI(int8_t command, float measured_rpm,
 static void Set_Motor_Commands(int8_t left_command, float left_rpm,
                                int8_t right_command, float right_rpm,
                                uint8_t start_cell_move);
+static void Start_Targeted_Move(int32_t left_delta, int32_t right_delta);
 static void Apply_Motor_Output(int8_t left_command, uint16_t left_duty,
                                int8_t right_command, uint16_t right_duty);
 void Motor_Control_Tick(void);
@@ -215,10 +222,51 @@ static void Apply_Motor_Output(int8_t left_command, uint16_t left_duty,
   }
 }
 
+static void Start_Targeted_Move(int32_t left_delta, int32_t right_delta)
+{
+  uint32_t interrupt_state = __get_PRIMASK();
+  __disable_irq();
+
+  left_cell_start = left_encoder_total;
+  right_cell_start = right_encoder_total;
+  left_cell_target = left_cell_start + left_delta;
+  right_cell_target = right_cell_start + right_delta;
+  left_target_move_total = (left_delta >= 0) ? left_delta : -left_delta;
+  right_target_move_total = (right_delta >= 0) ? right_delta : -right_delta;
+  left_target_move_dir = (left_delta > 0) ? 1 : ((left_delta < 0) ? -1 : 0);
+  right_target_move_dir = (right_delta > 0) ? 1 : ((right_delta < 0) ? -1 : 0);
+
+  left_motor_command = left_target_move_dir;
+  right_motor_command = right_target_move_dir;
+  left_target_rpm = MOTOR_TARGET_RPM;
+  right_target_rpm = MOTOR_TARGET_RPM;
+  left_integral = 0.0f;
+  right_integral = 0.0f;
+  left_pwm_duty = 0;
+  right_pwm_duty = 0;
+  cell_move_active = 1U;
+  cell_hold_active = 0U;
+  cell_move_start_tick = HAL_GetTick();
+  cell_move_timeout = 0U;
+
+  Apply_Motor_Output(left_target_move_dir, 0, right_target_move_dir, 0);
+
+  if (interrupt_state == 0U)
+  {
+    __enable_irq();
+  }
+}
+
 static void Set_Motor_Commands(int8_t left_command, float left_rpm,
                                int8_t right_command, float right_rpm,
                                uint8_t start_cell_move)
 {
+  if (start_cell_move != 0U)
+  {
+    Start_Targeted_Move(CELL_TICKS, CELL_TICKS);
+    return;
+  }
+
   uint32_t interrupt_state = __get_PRIMASK();
   __disable_irq();
 
@@ -230,17 +278,8 @@ static void Set_Motor_Commands(int8_t left_command, float left_rpm,
   right_integral = 0.0f;
   left_pwm_duty = 0;
   right_pwm_duty = 0;
-  cell_move_active = start_cell_move;
+  cell_move_active = 0U;
   cell_hold_active = 0U;
-  if (start_cell_move != 0U)
-  {
-    left_cell_start = left_encoder_total;
-    right_cell_start = right_encoder_total;
-    left_cell_target = left_cell_start + CELL_TICKS;
-    right_cell_target = right_cell_start + CELL_TICKS;
-    cell_move_start_tick = HAL_GetTick();
-    cell_move_timeout = 0U;
-  }
   Apply_Motor_Output(left_command, 0, right_command, 0);
 
   if (interrupt_state == 0U)
@@ -301,10 +340,14 @@ void Motor_Control_Tick(void)
   right_command = (int8_t)right_motor_command;
   if (cell_move_active != 0U)
   {
-    int32_t left_progress = left_encoder_total - left_cell_start;
-    int32_t right_progress = right_encoder_total - right_cell_start;
-    int32_t left_remaining = CELL_TICKS - left_progress;
-    int32_t right_remaining = CELL_TICKS - right_progress;
+    int32_t left_progress = (left_target_move_dir >= 0) ?
+        (left_encoder_total - left_cell_start) :
+        (left_cell_start - left_encoder_total);
+    int32_t right_progress = (right_target_move_dir >= 0) ?
+        (right_encoder_total - right_cell_start) :
+        (right_cell_start - right_encoder_total);
+    int32_t left_remaining = left_target_move_total - left_progress;
+    int32_t right_remaining = right_target_move_total - right_progress;
     float progress_error = (float)(left_progress - right_progress);
     float correction = progress_error * CELL_STRAIGHT_KP;
 
@@ -319,7 +362,7 @@ void Motor_Control_Tick(void)
       left_integral = 0.0f;
       right_integral = 0.0f;
     }
-    else if (left_progress >= CELL_TICKS && right_progress >= CELL_TICKS)
+    else if (left_remaining <= 0 && right_remaining <= 0)
     {
       cell_move_active = 0U;
       cell_hold_active = 1U;
@@ -332,14 +375,8 @@ void Motor_Control_Tick(void)
     }
     else
     {
-      if (left_progress >= CELL_TICKS)
-      {
-        left_command = 0;
-      }
-      if (right_progress >= CELL_TICKS)
-      {
-        right_command = 0;
-      }
+      left_command = (left_remaining <= 0) ? 0 : left_target_move_dir;
+      right_command = (right_remaining <= 0) ? 0 : right_target_move_dir;
 
       if (correction > CELL_MAX_STRAIGHT_CORRECTION_RPM)
       {
@@ -350,13 +387,13 @@ void Motor_Control_Tick(void)
         correction = -CELL_MAX_STRAIGHT_CORRECTION_RPM;
       }
 
-      if (left_remaining < CELL_SLOWDOWN_TICKS)
+      if (left_remaining < CELL_SLOWDOWN_TICKS && left_target_move_total > 0)
       {
         left_speed_target = CELL_MIN_APPROACH_RPM +
             (MOTOR_TARGET_RPM - CELL_MIN_APPROACH_RPM) *
             ((float)left_remaining / (float)CELL_SLOWDOWN_TICKS);
       }
-      if (right_remaining < CELL_SLOWDOWN_TICKS)
+      if (right_remaining < CELL_SLOWDOWN_TICKS && right_target_move_total > 0)
       {
         right_speed_target = CELL_MIN_APPROACH_RPM +
             (MOTOR_TARGET_RPM - CELL_MIN_APPROACH_RPM) *
@@ -509,7 +546,7 @@ int main(void)
   motor_control_enabled = 1U;
   {
     static const uint8_t controls_message[] =
-      "Keys: F=one cell W/S/A/D=drive Space/X=stop R=reset counts\r\n";
+      "Keys: F=1cell fwd, B=1cell rev, J=90L, K=90R, U=180, W/S/A/D=drive, Space/X=stop, R=reset\r\n";
     HAL_UART_Transmit(&huart2, (uint8_t *)controls_message,
                       sizeof(controls_message) - 1U, HAL_MAX_DELAY);
   }
@@ -529,7 +566,6 @@ int main(void)
     float req_left_rpm = MOTOR_TARGET_RPM;
     float req_right_rpm = MOTOR_TARGET_RPM;
     uint8_t command_changed = 0U;
-    uint8_t start_cell_move = 0U;
 
     if (HAL_UART_Receive(&huart2, &key, 1, 0) == HAL_OK)
     {
@@ -605,12 +641,28 @@ int main(void)
           break;
         case 'f':
         case 'F':
-          requested_left = 1;
-          requested_right = 1;
-          req_left_rpm = MOTOR_TARGET_RPM;
-          req_right_rpm = MOTOR_TARGET_RPM;
-          command_changed = 1U;
-          start_cell_move = 1U;
+          Start_Targeted_Move(CELL_TICKS, CELL_TICKS);
+          command_changed = 0U;
+          break;
+        case 'b':
+        case 'B':
+          Start_Targeted_Move(-CELL_TICKS, -CELL_TICKS);
+          command_changed = 0U;
+          break;
+        case 'j':
+        case 'J':
+          Start_Targeted_Move(-TURN_90_TICKS, TURN_90_TICKS);
+          command_changed = 0U;
+          break;
+        case 'k':
+        case 'K':
+          Start_Targeted_Move(TURN_90_TICKS, -TURN_90_TICKS);
+          command_changed = 0U;
+          break;
+        case 'u':
+        case 'U':
+          Start_Targeted_Move(-TURN_180_TICKS, TURN_180_TICKS);
+          command_changed = 0U;
           break;
         case 'x':
         case 'X':
@@ -648,7 +700,7 @@ int main(void)
       {
         Set_Motor_Commands(requested_left, req_left_rpm,
                            requested_right, req_right_rpm,
-                           start_cell_move);
+                           0U);
       }
     }
 
