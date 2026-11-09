@@ -36,6 +36,8 @@
 #define LEFT_COUNTS_PER_REV 815.70f
 #define RIGHT_COUNTS_PER_REV 815.55f
 #define MOTOR_TARGET_RPM 150.0f
+#define MOTOR_CURVE_SLOW_RPM 60.0f
+#define MOTOR_CURVE_FAST_RPM 150.0f
 #define CELL_TICKS 1060L
 #define CELL_SLOWDOWN_TICKS 250L
 #define CELL_MIN_APPROACH_RPM 60.0f
@@ -94,6 +96,8 @@ static volatile int32_t right_cell_start = 0;
 static volatile int32_t left_cell_target = 0;
 static volatile int32_t right_cell_target = 0;
 static volatile uint32_t cell_move_start_tick = 0;
+static volatile float left_target_rpm = MOTOR_TARGET_RPM;
+static volatile float right_target_rpm = MOTOR_TARGET_RPM;
 
 /* USER CODE END PV */
 
@@ -108,7 +112,8 @@ static void MX_USART2_UART_Init(void);
 static uint16_t Update_Motor_PI(int8_t command, float measured_rpm,
                                 float target_rpm, volatile float *integral,
                                 float feed_forward_duty, uint32_t elapsed_ms);
-static void Set_Motor_Commands(int8_t left_command, int8_t right_command,
+static void Set_Motor_Commands(int8_t left_command, float left_rpm,
+                               int8_t right_command, float right_rpm,
                                uint8_t start_cell_move);
 static void Apply_Motor_Output(int8_t left_command, uint16_t left_duty,
                                int8_t right_command, uint16_t right_duty);
@@ -210,7 +215,8 @@ static void Apply_Motor_Output(int8_t left_command, uint16_t left_duty,
   }
 }
 
-static void Set_Motor_Commands(int8_t left_command, int8_t right_command,
+static void Set_Motor_Commands(int8_t left_command, float left_rpm,
+                               int8_t right_command, float right_rpm,
                                uint8_t start_cell_move)
 {
   uint32_t interrupt_state = __get_PRIMASK();
@@ -218,6 +224,8 @@ static void Set_Motor_Commands(int8_t left_command, int8_t right_command,
 
   left_motor_command = left_command;
   right_motor_command = right_command;
+  left_target_rpm = (left_rpm > 0.0f) ? left_rpm : MOTOR_TARGET_RPM;
+  right_target_rpm = (right_rpm > 0.0f) ? right_rpm : MOTOR_TARGET_RPM;
   left_integral = 0.0f;
   right_integral = 0.0f;
   left_pwm_duty = 0;
@@ -255,8 +263,8 @@ void Motor_Control_Tick(void)
   int8_t left_command;
   int8_t right_command;
   uint8_t position_hold_mode = 0U;
-  float left_speed_target = MOTOR_TARGET_RPM;
-  float right_speed_target = MOTOR_TARGET_RPM;
+  float left_speed_target = left_target_rpm;
+  float right_speed_target = right_target_rpm;
 
   if (motor_control_enabled == 0U)
   {
@@ -422,17 +430,22 @@ void Motor_Control_Tick(void)
     }
   }
 
+  float left_ff = (position_hold_mode != 0U) ?
+      CELL_HOLD_FEED_FORWARD_DUTY :
+      (MOTOR_FEED_FORWARD_DUTY * (left_speed_target / MOTOR_TARGET_RPM));
+  float right_ff = (position_hold_mode != 0U) ?
+      CELL_HOLD_FEED_FORWARD_DUTY :
+      (MOTOR_FEED_FORWARD_DUTY * (right_speed_target / MOTOR_TARGET_RPM));
+
   left_pwm_duty = Update_Motor_PI(left_command, left_measured_rpm,
                                   (left_command == 0) ? 0.0f : left_speed_target,
                                   &left_integral,
-                                  (position_hold_mode != 0U) ?
-                                      CELL_HOLD_FEED_FORWARD_DUTY : MOTOR_FEED_FORWARD_DUTY,
+                                  left_ff,
                                   1000U / MOTOR_CONTROL_HZ);
   right_pwm_duty = Update_Motor_PI(right_command, right_measured_rpm,
                                    (right_command == 0) ? 0.0f : right_speed_target,
                                    &right_integral,
-                                   (position_hold_mode != 0U) ?
-                                       CELL_HOLD_FEED_FORWARD_DUTY : MOTOR_FEED_FORWARD_DUTY,
+                                   right_ff,
                                    1000U / MOTOR_CONTROL_HZ);
   Apply_Motor_Output(left_command, left_pwm_duty,
                      right_command, right_pwm_duty);
@@ -513,6 +526,8 @@ int main(void)
     uint8_t key;
     int8_t requested_left = (int8_t)left_motor_command;
     int8_t requested_right = (int8_t)right_motor_command;
+    float req_left_rpm = MOTOR_TARGET_RPM;
+    float req_right_rpm = MOTOR_TARGET_RPM;
     uint8_t command_changed = 0U;
     uint8_t start_cell_move = 0U;
 
@@ -524,30 +539,76 @@ int main(void)
         case 'W':
           requested_left = 1;
           requested_right = 1;
+          req_left_rpm = MOTOR_TARGET_RPM;
+          req_right_rpm = MOTOR_TARGET_RPM;
           command_changed = 1U;
           break;
         case 's':
         case 'S':
           requested_left = -1;
           requested_right = -1;
+          req_left_rpm = MOTOR_TARGET_RPM;
+          req_right_rpm = MOTOR_TARGET_RPM;
           command_changed = 1U;
           break;
         case 'a':
         case 'A':
           requested_left = -1;
           requested_right = 1;
+          req_left_rpm = MOTOR_TARGET_RPM;
+          req_right_rpm = MOTOR_TARGET_RPM;
           command_changed = 1U;
           break;
         case 'd':
         case 'D':
           requested_left = 1;
           requested_right = -1;
+          req_left_rpm = MOTOR_TARGET_RPM;
+          req_right_rpm = MOTOR_TARGET_RPM;
+          command_changed = 1U;
+          break;
+        case 'q':
+        case 'Q':
+          /* Smooth curve forward-left: Left motor 60 RPM forward, Right motor 150 RPM forward */
+          requested_left = 1;
+          requested_right = 1;
+          req_left_rpm = MOTOR_CURVE_SLOW_RPM;
+          req_right_rpm = MOTOR_CURVE_FAST_RPM;
+          command_changed = 1U;
+          break;
+        case 'e':
+        case 'E':
+          /* Smooth curve forward-right: Left motor 150 RPM forward, Right motor 60 RPM forward */
+          requested_left = 1;
+          requested_right = 1;
+          req_left_rpm = MOTOR_CURVE_FAST_RPM;
+          req_right_rpm = MOTOR_CURVE_SLOW_RPM;
+          command_changed = 1U;
+          break;
+        case 'z':
+        case 'Z':
+          /* Smooth curve reverse-left: Left motor 60 RPM reverse, Right motor 150 RPM reverse */
+          requested_left = -1;
+          requested_right = -1;
+          req_left_rpm = MOTOR_CURVE_SLOW_RPM;
+          req_right_rpm = MOTOR_CURVE_FAST_RPM;
+          command_changed = 1U;
+          break;
+        case 'c':
+        case 'C':
+          /* Smooth curve reverse-right: Left motor 150 RPM reverse, Right motor 60 RPM reverse */
+          requested_left = -1;
+          requested_right = -1;
+          req_left_rpm = MOTOR_CURVE_FAST_RPM;
+          req_right_rpm = MOTOR_CURVE_SLOW_RPM;
           command_changed = 1U;
           break;
         case 'f':
         case 'F':
           requested_left = 1;
           requested_right = 1;
+          req_left_rpm = MOTOR_TARGET_RPM;
+          req_right_rpm = MOTOR_TARGET_RPM;
           command_changed = 1U;
           start_cell_move = 1U;
           break;
@@ -556,6 +617,8 @@ int main(void)
         case ' ':
           requested_left = 0;
           requested_right = 0;
+          req_left_rpm = 0.0f;
+          req_right_rpm = 0.0f;
           command_changed = 1U;
           break;
         case 'r':
@@ -583,7 +646,9 @@ int main(void)
       }
       if (command_changed != 0U)
       {
-        Set_Motor_Commands(requested_left, requested_right, start_cell_move);
+        Set_Motor_Commands(requested_left, req_left_rpm,
+                           requested_right, req_right_rpm,
+                           start_cell_move);
       }
     }
 

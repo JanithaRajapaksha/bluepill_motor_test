@@ -106,6 +106,22 @@ py motor_keyboard.py --port COM5
 
 Replace `COM5` with the adapter's actual COM port. `--baud` may be specified if the firmware baud rate is changed; it defaults to 115200. The script requires the board to be flashed and connected. If the keyboard listener cannot access global keyboard events, run it from a normal desktop session with the required Windows permissions.
 
+## Standalone odometry GUI
+
+`odometry_gui.py` is a separate Tkinter application; it does not extend or launch `motor_keyboard.py`. It reads the same USART2 telemetry and displays a cell grid, the path traveled, the robot's current heading, encoder totals, and measured wheel speeds. Position is shown in millimeters, with heading in degrees clockwise from north. The GUI also provides **Forward one cell**, **Stop**, and **Reset pose + encoders** buttons.
+
+Run it from the project virtual environment:
+
+```powershell
+py odometry_gui.py
+```
+
+In the GUI, choose the board's COM port and baud rate. The measured counts/revolution values are prefilled. Enter the actual wheel diameter and the distance between the left and right wheel contact centers (track width); these are required for metric odometry and heading. The grid-cell size defaults to 180 mm as a display reference and can be changed to match the maze. Connect after entering the dimensions.
+
+The pose uses differential-drive odometry: each encoder's count change is converted to wheel travel using counts/revolution and wheel circumference; the difference between wheel travels updates heading using track width. The drawn path is dead-reckoned from that pose. **Reset pose + encoders** sends `X`, waits briefly for the current move to stop, sends `R` to reset the firmware's accumulated encoder totals, then starts the GUI pose at `(0, 0, 0)`. `F` starts the firmware's one-cell move and `X` stops it. Close `motor_keyboard.py` or any other serial monitor before connecting; only one application can use the COM port at a time.
+
+Encoder-only odometry accumulates error from wheel-diameter/track calibration, tire slip, uneven floors, and mechanical play. The display is a dead-reckoned estimate, not an absolute position sensor or a full RViz replacement. Use wall sensors or a gyro to correct accumulated pose drift for reliable maze navigation.
+
 ## Build and flash
 
 1. Open STM32CubeIDE and import this folder as an existing project.
