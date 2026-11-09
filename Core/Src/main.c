@@ -33,7 +33,27 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define MOTOR_CONTROL_DUTY 300U
+#define LEFT_COUNTS_PER_REV 815.70f
+#define RIGHT_COUNTS_PER_REV 815.55f
+#define MOTOR_TARGET_RPM 150.0f
+#define CELL_TICKS 1060L
+#define CELL_SLOWDOWN_TICKS 250L
+#define CELL_MIN_APPROACH_RPM 60.0f
+#define CELL_STRAIGHT_KP 0.08f
+#define CELL_MAX_STRAIGHT_CORRECTION_RPM 30.0f
+#define CELL_MOVE_TIMEOUT_MS 3000U
+#define CELL_HOLD_DEADBAND_TICKS 20L
+#define CELL_HOLD_MIN_RPM 35.0f
+#define CELL_HOLD_MAX_RPM 60.0f
+#define CELL_HOLD_RPM_PER_TICK 0.25f
+#define CELL_HOLD_FEED_FORWARD_DUTY 180.0f
+#define MOTOR_CONTROL_HZ 1000U
+#define MOTOR_RPM_WINDOW_MS 20U
+#define MOTOR_REPORT_PERIOD_MS 100U
+#define MOTOR_PWM_MAX 600.0f
+#define MOTOR_FEED_FORWARD_DUTY 300.0f
+#define MOTOR_KP 0.8f
+#define MOTOR_KI 6.5f
 
 /* USER CODE END PD */
 
@@ -50,13 +70,30 @@ TIM_HandleTypeDef htim3;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-static int32_t left_encoder_total = 0;
-static int32_t right_encoder_total = 0;
+static volatile int32_t left_encoder_total = 0;
+static volatile int32_t right_encoder_total = 0;
 static uint16_t left_encoder_previous = 0;
 static uint16_t right_encoder_previous = 0;
+static int32_t left_report_total = 0;
+static int32_t right_report_total = 0;
 static uint32_t encoder_report_tick = 0;
-static int8_t left_motor_command = 0;
-static int8_t right_motor_command = 0;
+static volatile int8_t left_motor_command = 0;
+static volatile int8_t right_motor_command = 0;
+static volatile float left_measured_rpm = 0.0f;
+static volatile float right_measured_rpm = 0.0f;
+static volatile float left_integral = 0.0f;
+static volatile float right_integral = 0.0f;
+static volatile uint16_t left_pwm_duty = 0;
+static volatile uint16_t right_pwm_duty = 0;
+static volatile uint8_t motor_control_enabled = 0;
+static volatile uint8_t cell_move_active = 0;
+static volatile uint8_t cell_hold_active = 0;
+static volatile uint8_t cell_move_timeout = 0;
+static volatile int32_t left_cell_start = 0;
+static volatile int32_t right_cell_start = 0;
+static volatile int32_t left_cell_target = 0;
+static volatile int32_t right_cell_target = 0;
+static volatile uint32_t cell_move_start_tick = 0;
 
 /* USER CODE END PV */
 
@@ -68,25 +105,85 @@ static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
-static void Set_Motor_Speed(int8_t left_command, int8_t right_command);
+static uint16_t Update_Motor_PI(int8_t command, float measured_rpm,
+                                float target_rpm, volatile float *integral,
+                                float feed_forward_duty, uint32_t elapsed_ms);
+static void Set_Motor_Commands(int8_t left_command, int8_t right_command,
+                               uint8_t start_cell_move);
+static void Apply_Motor_Output(int8_t left_command, uint16_t left_duty,
+                               int8_t right_command, uint16_t right_duty);
+void Motor_Control_Tick(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static void Set_Motor_Speed(int8_t left_command, int8_t right_command)
+static uint16_t Update_Motor_PI(int8_t command, float measured_rpm,
+                                float target_rpm, volatile float *integral,
+                                float feed_forward_duty, uint32_t elapsed_ms)
 {
-  if (left_command > 0)
+  float speed_error;
+  float candidate_integral;
+  float feed_forward;
+  float output;
+
+  if (command == 0)
+  {
+    *integral = 0.0f;
+    return 0;
+  }
+
+  if (measured_rpm < 0.0f)
+  {
+    measured_rpm = -measured_rpm;
+  }
+
+  speed_error = target_rpm - measured_rpm;
+  candidate_integral = *integral + MOTOR_KI * speed_error * ((float)elapsed_ms / 1000.0f);
+  if (candidate_integral > MOTOR_PWM_MAX)
+  {
+    candidate_integral = MOTOR_PWM_MAX;
+  }
+  else if (candidate_integral < -MOTOR_PWM_MAX)
+  {
+    candidate_integral = -MOTOR_PWM_MAX;
+  }
+
+  feed_forward = feed_forward_duty;
+  output = feed_forward + (MOTOR_KP * speed_error) + candidate_integral;
+  if (!((output > MOTOR_PWM_MAX && speed_error > 0.0f) ||
+        (output < 0.0f && speed_error < 0.0f)))
+  {
+    *integral = candidate_integral;
+  }
+
+  output = feed_forward + (MOTOR_KP * speed_error) + *integral;
+  if (output < 0.0f)
+  {
+    output = 0.0f;
+  }
+  else if (output > MOTOR_PWM_MAX)
+  {
+    output = MOTOR_PWM_MAX;
+  }
+
+  return (uint16_t)output;
+}
+
+static void Apply_Motor_Output(int8_t left_command, uint16_t left_duty,
+                               int8_t right_command, uint16_t right_duty)
+{
+  if (left_command > 0 && left_duty > 0U)
   {
     HAL_GPIO_WritePin(GPIOB, AIN1_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOB, AIN2_Pin, GPIO_PIN_SET);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, MOTOR_CONTROL_DUTY);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, left_duty);
   }
-  else if (left_command < 0)
+  else if (left_command < 0 && left_duty > 0U)
   {
     HAL_GPIO_WritePin(GPIOB, AIN1_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(GPIOB, AIN2_Pin, GPIO_PIN_RESET);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, MOTOR_CONTROL_DUTY);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, left_duty);
   }
   else
   {
@@ -94,23 +191,251 @@ static void Set_Motor_Speed(int8_t left_command, int8_t right_command)
     HAL_GPIO_WritePin(GPIOB, AIN1_Pin | AIN2_Pin, GPIO_PIN_RESET);
   }
 
-  if (right_command > 0)
+  if (right_command > 0 && right_duty > 0U)
   {
     HAL_GPIO_WritePin(GPIOB, BIN1_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOB, BIN2_Pin, GPIO_PIN_SET);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, MOTOR_CONTROL_DUTY);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, right_duty);
   }
-  else if (right_command < 0)
+  else if (right_command < 0 && right_duty > 0U)
   {
     HAL_GPIO_WritePin(GPIOB, BIN1_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(GPIOB, BIN2_Pin, GPIO_PIN_RESET);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, MOTOR_CONTROL_DUTY);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, right_duty);
   }
   else
   {
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
     HAL_GPIO_WritePin(GPIOB, BIN1_Pin | BIN2_Pin, GPIO_PIN_RESET);
   }
+}
+
+static void Set_Motor_Commands(int8_t left_command, int8_t right_command,
+                               uint8_t start_cell_move)
+{
+  uint32_t interrupt_state = __get_PRIMASK();
+  __disable_irq();
+
+  left_motor_command = left_command;
+  right_motor_command = right_command;
+  left_integral = 0.0f;
+  right_integral = 0.0f;
+  left_pwm_duty = 0;
+  right_pwm_duty = 0;
+  cell_move_active = start_cell_move;
+  cell_hold_active = 0U;
+  if (start_cell_move != 0U)
+  {
+    left_cell_start = left_encoder_total;
+    right_cell_start = right_encoder_total;
+    left_cell_target = left_cell_start + CELL_TICKS;
+    right_cell_target = right_cell_start + CELL_TICKS;
+    cell_move_start_tick = HAL_GetTick();
+    cell_move_timeout = 0U;
+  }
+  Apply_Motor_Output(left_command, 0, right_command, 0);
+
+  if (interrupt_state == 0U)
+  {
+    __enable_irq();
+  }
+}
+
+void Motor_Control_Tick(void)
+{
+  static int16_t left_delta_history[MOTOR_RPM_WINDOW_MS] = {0};
+  static int16_t right_delta_history[MOTOR_RPM_WINDOW_MS] = {0};
+  static int32_t left_window_count = 0;
+  static int32_t right_window_count = 0;
+  static uint8_t history_index = 0;
+  uint16_t left_current;
+  uint16_t right_current;
+  int16_t left_delta;
+  int16_t right_delta;
+  int8_t left_command;
+  int8_t right_command;
+  uint8_t position_hold_mode = 0U;
+  float left_speed_target = MOTOR_TARGET_RPM;
+  float right_speed_target = MOTOR_TARGET_RPM;
+
+  if (motor_control_enabled == 0U)
+  {
+    return;
+  }
+
+  left_current = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+  right_current = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+  left_delta = (int16_t)(left_current - left_encoder_previous);
+  right_delta = (int16_t)(right_encoder_previous - right_current);
+  left_encoder_previous = left_current;
+  right_encoder_previous = right_current;
+  left_encoder_total += left_delta;
+  right_encoder_total += right_delta;
+
+  left_window_count -= left_delta_history[history_index];
+  right_window_count -= right_delta_history[history_index];
+  left_delta_history[history_index] = left_delta;
+  right_delta_history[history_index] = right_delta;
+  left_window_count += left_delta;
+  right_window_count += right_delta;
+  history_index++;
+  if (history_index >= MOTOR_RPM_WINDOW_MS)
+  {
+    history_index = 0;
+  }
+
+  left_measured_rpm = ((float)left_window_count * 60000.0f) /
+                      (LEFT_COUNTS_PER_REV * (float)MOTOR_RPM_WINDOW_MS);
+  right_measured_rpm = ((float)right_window_count * 60000.0f) /
+                       (RIGHT_COUNTS_PER_REV * (float)MOTOR_RPM_WINDOW_MS);
+
+  left_command = (int8_t)left_motor_command;
+  right_command = (int8_t)right_motor_command;
+  if (cell_move_active != 0U)
+  {
+    int32_t left_progress = left_encoder_total - left_cell_start;
+    int32_t right_progress = right_encoder_total - right_cell_start;
+    int32_t left_remaining = CELL_TICKS - left_progress;
+    int32_t right_remaining = CELL_TICKS - right_progress;
+    float progress_error = (float)(left_progress - right_progress);
+    float correction = progress_error * CELL_STRAIGHT_KP;
+
+    if ((HAL_GetTick() - cell_move_start_tick) >= CELL_MOVE_TIMEOUT_MS)
+    {
+      cell_move_active = 0U;
+      cell_move_timeout = 1U;
+      left_command = 0;
+      right_command = 0;
+      left_motor_command = 0;
+      right_motor_command = 0;
+      left_integral = 0.0f;
+      right_integral = 0.0f;
+    }
+    else if (left_progress >= CELL_TICKS && right_progress >= CELL_TICKS)
+    {
+      cell_move_active = 0U;
+      cell_hold_active = 1U;
+      left_command = 0;
+      right_command = 0;
+      left_motor_command = 0;
+      right_motor_command = 0;
+      left_integral = 0.0f;
+      right_integral = 0.0f;
+    }
+    else
+    {
+      if (left_progress >= CELL_TICKS)
+      {
+        left_command = 0;
+      }
+      if (right_progress >= CELL_TICKS)
+      {
+        right_command = 0;
+      }
+
+      if (correction > CELL_MAX_STRAIGHT_CORRECTION_RPM)
+      {
+        correction = CELL_MAX_STRAIGHT_CORRECTION_RPM;
+      }
+      else if (correction < -CELL_MAX_STRAIGHT_CORRECTION_RPM)
+      {
+        correction = -CELL_MAX_STRAIGHT_CORRECTION_RPM;
+      }
+
+      if (left_remaining < CELL_SLOWDOWN_TICKS)
+      {
+        left_speed_target = CELL_MIN_APPROACH_RPM +
+            (MOTOR_TARGET_RPM - CELL_MIN_APPROACH_RPM) *
+            ((float)left_remaining / (float)CELL_SLOWDOWN_TICKS);
+      }
+      if (right_remaining < CELL_SLOWDOWN_TICKS)
+      {
+        right_speed_target = CELL_MIN_APPROACH_RPM +
+            (MOTOR_TARGET_RPM - CELL_MIN_APPROACH_RPM) *
+            ((float)right_remaining / (float)CELL_SLOWDOWN_TICKS);
+      }
+
+      left_speed_target -= correction;
+      right_speed_target += correction;
+      if (left_speed_target < CELL_MIN_APPROACH_RPM)
+      {
+        left_speed_target = CELL_MIN_APPROACH_RPM;
+      }
+      if (right_speed_target < CELL_MIN_APPROACH_RPM)
+      {
+        right_speed_target = CELL_MIN_APPROACH_RPM;
+      }
+      if (left_speed_target > MOTOR_TARGET_RPM)
+      {
+        left_speed_target = MOTOR_TARGET_RPM;
+      }
+      if (right_speed_target > MOTOR_TARGET_RPM)
+      {
+        right_speed_target = MOTOR_TARGET_RPM;
+      }
+    }
+  }
+  else if (cell_hold_active != 0U)
+  {
+    int32_t left_position_error = left_cell_target - left_encoder_total;
+    int32_t right_position_error = right_cell_target - right_encoder_total;
+    int32_t left_error_magnitude = (left_position_error >= 0) ?
+                                  left_position_error : -left_position_error;
+    int32_t right_error_magnitude = (right_position_error >= 0) ?
+                                   right_position_error : -right_position_error;
+
+    position_hold_mode = 1U;
+    if (left_error_magnitude > CELL_HOLD_DEADBAND_TICKS)
+    {
+      left_command = (left_position_error > 0) ? 1 : -1;
+      left_speed_target = (float)left_error_magnitude * CELL_HOLD_RPM_PER_TICK;
+      if (left_speed_target < CELL_HOLD_MIN_RPM)
+      {
+        left_speed_target = CELL_HOLD_MIN_RPM;
+      }
+      else if (left_speed_target > CELL_HOLD_MAX_RPM)
+      {
+        left_speed_target = CELL_HOLD_MAX_RPM;
+      }
+    }
+    else
+    {
+      left_command = 0;
+    }
+
+    if (right_error_magnitude > CELL_HOLD_DEADBAND_TICKS)
+    {
+      right_command = (right_position_error > 0) ? 1 : -1;
+      right_speed_target = (float)right_error_magnitude * CELL_HOLD_RPM_PER_TICK;
+      if (right_speed_target < CELL_HOLD_MIN_RPM)
+      {
+        right_speed_target = CELL_HOLD_MIN_RPM;
+      }
+      else if (right_speed_target > CELL_HOLD_MAX_RPM)
+      {
+        right_speed_target = CELL_HOLD_MAX_RPM;
+      }
+    }
+    else
+    {
+      right_command = 0;
+    }
+  }
+
+  left_pwm_duty = Update_Motor_PI(left_command, left_measured_rpm,
+                                  (left_command == 0) ? 0.0f : left_speed_target,
+                                  &left_integral,
+                                  (position_hold_mode != 0U) ?
+                                      CELL_HOLD_FEED_FORWARD_DUTY : MOTOR_FEED_FORWARD_DUTY,
+                                  1000U / MOTOR_CONTROL_HZ);
+  right_pwm_duty = Update_Motor_PI(right_command, right_measured_rpm,
+                                   (right_command == 0) ? 0.0f : right_speed_target,
+                                   &right_integral,
+                                   (position_hold_mode != 0U) ?
+                                       CELL_HOLD_FEED_FORWARD_DUTY : MOTOR_FEED_FORWARD_DUTY,
+                                   1000U / MOTOR_CONTROL_HZ);
+  Apply_Motor_Output(left_command, left_pwm_duty,
+                     right_command, right_pwm_duty);
 }
 
 /* USER CODE END 0 */
@@ -158,6 +483,7 @@ int main(void)
   }
   left_encoder_previous = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
   right_encoder_previous = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+  encoder_report_tick = HAL_GetTick();
 
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK ||
       HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2) != HAL_OK)
@@ -166,10 +492,11 @@ int main(void)
   }
 
   HAL_GPIO_WritePin(GPIOB, STBY_Pin, GPIO_PIN_SET);
-  Set_Motor_Speed(0, 0);
+  Apply_Motor_Output(0, 0, 0, 0);
+  motor_control_enabled = 1U;
   {
     static const uint8_t controls_message[] =
-        "Keys: W=forward S=reverse A=left D=right Space/X=stop R=reset counts\r\n";
+      "Keys: F=one cell W/S/A/D=drive Space/X=stop R=reset counts\r\n";
     HAL_UART_Transmit(&huart2, (uint8_t *)controls_message,
                       sizeof(controls_message) - 1U, HAL_MAX_DELAY);
   }
@@ -184,6 +511,10 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     uint8_t key;
+    int8_t requested_left = (int8_t)left_motor_command;
+    int8_t requested_right = (int8_t)right_motor_command;
+    uint8_t command_changed = 0U;
+    uint8_t start_cell_move = 0U;
 
     if (HAL_UART_Receive(&huart2, &key, 1, 0) == HAL_OK)
     {
@@ -191,63 +522,96 @@ int main(void)
       {
         case 'w':
         case 'W':
-          left_motor_command = 1;
-          right_motor_command = 1;
+          requested_left = 1;
+          requested_right = 1;
+          command_changed = 1U;
           break;
         case 's':
         case 'S':
-          left_motor_command = -1;
-          right_motor_command = -1;
+          requested_left = -1;
+          requested_right = -1;
+          command_changed = 1U;
           break;
         case 'a':
         case 'A':
-          left_motor_command = -1;
-          right_motor_command = 1;
+          requested_left = -1;
+          requested_right = 1;
+          command_changed = 1U;
           break;
         case 'd':
         case 'D':
-          left_motor_command = 1;
-          right_motor_command = -1;
+          requested_left = 1;
+          requested_right = -1;
+          command_changed = 1U;
+          break;
+        case 'f':
+        case 'F':
+          requested_left = 1;
+          requested_right = 1;
+          command_changed = 1U;
+          start_cell_move = 1U;
           break;
         case 'x':
         case 'X':
         case ' ':
-          left_motor_command = 0;
-          right_motor_command = 0;
+          requested_left = 0;
+          requested_right = 0;
+          command_changed = 1U;
           break;
         case 'r':
         case 'R':
-          left_encoder_total = 0;
-          right_encoder_total = 0;
-          left_encoder_previous = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-          right_encoder_previous = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-          encoder_report_tick = HAL_GetTick();
+        {
+          if (cell_move_active == 0U)
+          {
+            uint32_t interrupt_state = __get_PRIMASK();
+            __disable_irq();
+            cell_hold_active = 0U;
+            left_encoder_total = 0;
+            right_encoder_total = 0;
+            left_report_total = 0;
+            right_report_total = 0;
+            encoder_report_tick = HAL_GetTick();
+            if (interrupt_state == 0U)
+            {
+              __enable_irq();
+            }
+          }
           break;
+        }
         default:
           break;
       }
-      Set_Motor_Speed(left_motor_command, right_motor_command);
+      if (command_changed != 0U)
+      {
+        Set_Motor_Commands(requested_left, requested_right, start_cell_move);
+      }
     }
 
-    if ((HAL_GetTick() - encoder_report_tick) >= 100U)
+    if (cell_move_timeout != 0U)
     {
-      uint16_t left_encoder_current = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
-      uint16_t right_encoder_current = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
-      int16_t left_encoder_delta = (int16_t)(left_encoder_current - left_encoder_previous);
-      int16_t right_encoder_delta = (int16_t)(right_encoder_previous - right_encoder_current);
-      char report[96];
-      int report_length;
+      static const uint8_t timeout_message[] = "CELL_TIMEOUT: motors stopped\r\n";
+      cell_move_timeout = 0U;
+      HAL_UART_Transmit(&huart2, (uint8_t *)timeout_message,
+                        sizeof(timeout_message) - 1U, HAL_MAX_DELAY);
+    }
 
-      left_encoder_total += left_encoder_delta;
-      right_encoder_total += right_encoder_delta;
-      left_encoder_previous = left_encoder_current;
-      right_encoder_previous = right_encoder_current;
+    if ((HAL_GetTick() - encoder_report_tick) >= MOTOR_REPORT_PERIOD_MS)
+    {
+      char report[128];
+      int report_length;
+      int32_t left_report_delta = left_encoder_total - left_report_total;
+      int32_t right_report_delta = right_encoder_total - right_report_total;
+
+      left_report_total = left_encoder_total;
+      right_report_total = right_encoder_total;
       encoder_report_tick = HAL_GetTick();
 
       report_length = snprintf(report, sizeof(report),
-                               "Left: %ld (d=%d)  Right: %ld (d=%d)\r\n",
-                               (long)left_encoder_total, (int)left_encoder_delta,
-                               (long)right_encoder_total, (int)right_encoder_delta);
+                               "L:%ld d:%ld RPM:%ld PWM:%u | R:%ld d:%ld RPM:%ld PWM:%u\r\n",
+                               (long)left_encoder_total, (long)left_report_delta,
+                               (long)left_measured_rpm, (unsigned int)left_pwm_duty,
+                               (long)right_encoder_total, (long)right_report_delta,
+                               (long)right_measured_rpm, (unsigned int)right_pwm_duty);
       if (report_length > 0)
       {
         HAL_UART_Transmit(&huart2, (uint8_t *)report, (uint16_t)report_length, HAL_MAX_DELAY);

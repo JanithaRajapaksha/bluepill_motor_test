@@ -53,6 +53,10 @@ def main() -> int:
             held_keys.clear()
             if not send("x"):
                 return False
+        elif character == "f":
+            held_keys.clear()
+            if not send("f"):
+                return False
         elif character == "r":
             if not send("r"):
                 return False
@@ -76,7 +80,7 @@ def main() -> int:
         send("x")
         print(f"Controlling {args.port} at {args.baud} baud.")
         print("Hold W/A/S/D to move; release to stop or resume another held key.")
-        print("Space/X stops, R resets encoder totals, Esc exits. Encoder output follows.")
+        print("F moves one cell; Space/X stops, R resets counts, Esc exits.")
         listener.start()
         listener_started = True
 

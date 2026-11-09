@@ -1,62 +1,101 @@
-# Bluepill Motor Encoder Test
+# Blue Pill Micromouse Drive Controller
 
-STM32CubeIDE project for controlling two DC motors and reading their quadrature encoders on an STM32F103C8T6 (Blue Pill). Encoder totals and count changes stream continuously over USART2 while the motors are controlled with serial keyboard keys.
+STM32CubeIDE firmware and a Windows Python keyboard utility for a two-wheel differential-drive micromouse. The firmware reads both quadrature encoders, runs independent PI wheel-speed controllers, accepts movement commands over USART2, and can execute a one-cell forward move with encoder-based wheel correction and position hold.
 
-## Encoder connections
+## Hardware
 
-| Motor | Timer | Encoder channel 1 | Encoder channel 2 |
-| --- | --- | --- | --- |
-| Left | TIM2 | PA0 | PA1 |
-| Right | TIM3 | PA6 | PA7 |
+The project targets an STM32F103C8T6 (Blue Pill), an H-bridge motor driver with two direction inputs and one PWM input per motor, two quadrature encoders, and a motor power supply appropriate for the motors and driver. Do not power motors directly from the MCU pins. Connect the motor-driver ground, MCU ground, and USB-to-UART adapter ground together.
 
-The firmware treats TIM2 as the left encoder and TIM3 as the right encoder. The right encoder's reported direction is inverted in software. If the physical motor assignment differs, swap the left/right labels or timer usage in `Core/Src/main.c`.
+| Function | MCU pin or peripheral | Project assignment |
+| --- | --- | --- |
+| Left encoder channel A/B | PA0 / PA1 | TIM2 CH1 / CH2 |
+| Right encoder channel A/B | PA6 / PA7 | TIM3 CH1 / CH2 |
+| Left motor PWM | PA8 | TIM1 CH1 |
+| Right motor PWM | PA9 | TIM1 CH2 |
+| Left motor direction | PB0 / PB1 | AIN1 / AIN2 |
+| Right motor direction | PB10 / PB11 | BIN1 / BIN2 |
+| Motor driver standby | PB13 | STBY, high enables driver |
+| Serial transmit | PA2 | USART2 TX |
+| Serial receive | PA3 | USART2 RX |
 
-## Keyboard motor control
+The firmware assumes driver channel A is the left motor and channel B is the right motor. Positive motor commands use IN1 low and IN2 high; reverse commands use IN1 high and IN2 low. The actual physical forward direction depends on wiring. Swap the direction states or channel assignments in `Apply_Motor_Output` if necessary.
 
-Connect a USB-to-UART adapter to USART2 and open a serial terminal at **115200 baud, 8 data bits, no parity, 1 stop bit**. Configure it to send keystrokes immediately rather than waiting for Enter, then send these keys:
+## Encoder calibration
 
-| Key | Action |
+TIM2 is treated as the left wheel and TIM3 as the right wheel. The right encoder count direction is inverted in software so forward movement should increase both reported totals.
+
+Measured over 20 wheel revolutions:
+
+| Wheel | Measured counts/revolution |
+| --- | ---: |
+| Left | 815.70 |
+| Right | 815.55 |
+
+These are the values used to calculate wheel RPM. The current one-cell target is **1060 normalized encoder ticks per wheel**. This value is an initial assumption, not yet validated against the physical maze cell pitch and floor. Calibrate it by resetting the counts, moving the robot exactly one cell on the real floor, and recording both wheel deltas. Update `CELL_TICKS` in `Core/Src/main.c` after calibration.
+
+## Firmware behavior
+
+The STM32 SysTick runs at 1 kHz and calls the motor controller every 1 ms. Encoder counts are sampled each tick. RPM feedback uses a rolling 20 ms count window to reduce the quantization caused by low encoder counts per millisecond. Serial telemetry is printed separately every 100 ms.
+
+Each wheel has its own PI speed loop. Current settings in `Core/Src/main.c` are:
+
+| Setting | Current value | Purpose |
+| --- | ---: | --- |
+| Normal wheel-speed target | 150 RPM | Forward/reverse and pivot speed target |
+| `MOTOR_KP` | 0.8 | Proportional speed correction |
+| `MOTOR_KI` | 6.5 | Integral speed correction |
+| Normal feed-forward PWM | 300 / 1000 | Starting PWM estimate |
+| Maximum PWM | 600 / 1000 | 60% output limit |
+| Speed-loop period | 1 ms | 1 kHz update |
+| RPM measurement window | 20 ms | Encoder smoothing window |
+
+Treat these values as initial tuning settings. Tune with the robot secured and wheels lifted first. If RPM oscillates or overshoots, reduce `MOTOR_KI`; do not increase the PWM cap unless the motor, driver, and power supply are rated for it.
+
+### Serial commands
+
+USART2 uses **115200 baud, 8 data bits, no parity, 1 stop bit**. Firmware commands are single characters:
+
+| Command | Action |
 | --- | --- |
-| W | Drive both motors forward |
-| S | Drive both motors backward |
-| A | Turn left in place |
-| D | Turn right in place |
-| Space or X | Stop both motors |
-| R | Reset both displayed encoder totals to zero |
+| `W` | Drive both wheels forward at the 150 RPM target |
+| `S` | Drive both wheels backward at the 150 RPM target |
+| `A` | Pivot left: left reverse, right forward |
+| `D` | Pivot right: left forward, right reverse |
+| `F` | Start a one-cell forward move |
+| `X` or space | Stop both motors and cancel cell move/hold |
+| `R` | Reset displayed encoder totals and cancel position hold; ignored during an active `F` move |
 
-Commands remain active until another command is received. Motors start stopped. The control uses a fixed 30% PWM duty. The assumed forward direction is IN1 low and IN2 high for each motor; actual wheel direction depends on motor wiring. Raise the wheels clear of the surface and secure the chassis before powering the motor supply.
+Commands are case-insensitive. `W`, `S`, `A`, and `D` remain active until another command arrives. The motors start stopped after reset or power-up.
 
-The controls assume driver channel A (AIN1/AIN2, TIM1 CH1) is the left motor and channel B (BIN1/BIN2, TIM1 CH2) is the right motor. Swap those assignments in `Set_Motor_Speed` if the wiring is reversed.
+### One-cell move and encoder hold
 
-## Build and flash
+`F` requests a one-cell forward move. The firmware records each wheel's starting count, targets `CELL_TICKS` for both wheels, trims wheel-speed targets according to which wheel is ahead, and slows the wheels as they approach the target. Each wheel stops when it reaches its own target. When both targets are reached, the firmware enters encoder-count hold at the final counts.
 
-1. Open STM32CubeIDE and import this folder as an existing project.
-2. Select the `Debug` configuration and build the project.
-3. Connect the Blue Pill with an ST-Link debugger and use **Run** or **Debug** to flash it.
+While holding, the controller allows a **20 tick deadband**. If a wheel differs from its stored target by more than that, it corrects that wheel at a limited 35-60 RPM target using a lower 180/1000 feed-forward PWM. The hold remains active until `X`/space, a new movement command, or `R`. If the one-cell target is not reached within 3 seconds, both motors stop and the firmware reports `CELL_TIMEOUT`.
 
-The project is configured for the STM32F103C8Tx and uses the STM32F1 HAL drivers included under `Drivers/`.
+Encoder hold only observes wheel rotation. It cannot distinguish an intentional wheel turn from wheel slip, and it cannot measure sideways displacement or absolute chassis position. Corrections can move the chassis. Wall sensors and/or a gyro are needed for robust pose correction; test encoder hold carefully before using it on a maze.
 
-## View encoder output
+### Encoder telemetry
 
-Connect a USB-to-UART adapter to USART2:
-
-- PA2: USART2 TX to the adapter's RX
-- PA3: USART2 RX to the adapter's TX (required for keyboard control)
-- GND: common ground
-
-The firmware prints a line every 100 ms, including while motors are moving:
+The firmware prints a line every 100 ms:
 
 ```text
-Left: <total> (d=<change>)  Right: <total> (d=<change>)
+L:<total> d:<change> RPM:<rpm> PWM:<duty> | R:<total> d:<change> RPM:<rpm> PWM:<duty>
 ```
 
-The `d` value is the signed count change over the latest reporting interval. Encoder counting is handled by the STM32 timer peripherals and continues while the main loop polls for motor-control keys.
+`total` is the accumulated normalized count, `d` is the change since the preceding report, `RPM` is measured wheel speed, and `PWM` is the applied compare value from 0 to 600. When accepted, `R` resets displayed totals to zero; it does not reset the hardware encoder timers.
 
-## Hold-to-run Python controller
+## Python hold-to-run keyboard utility
 
-The Python controller sends motor commands on key-down and sends stop when the movement key is released. It also displays the encoder lines received from the board. Close other serial-monitor applications before starting it because only one application can use the COM port at a time.
+`motor_keyboard.py` listens for PC keyboard press and release events, sends the corresponding firmware characters, and prints incoming telemetry. Hold `W/A/S/D` to drive; releasing the active movement key sends stop or resumes another movement key that remains held. `F` is a one-shot cell command and is not cancelled when the key is released. Space or `X` stops immediately, `R` resets counts, and `Esc` exits after sending a final stop command.
 
-On Windows, install Python dependencies and start the script with the COM port assigned to your USB-to-UART adapter:
+Connect a USB-to-UART adapter with TX/RX crossed and a common ground:
+
+- Adapter RX to PA2 (MCU USART2 TX)
+- Adapter TX to PA3 (MCU USART2 RX, required for control)
+- Adapter GND to MCU/driver GND
+
+Close other serial-terminal applications before starting the Python utility because the COM port can only be opened by one program at a time. On Windows, install and run it from PowerShell:
 
 ```powershell
 py -m venv .venv
@@ -65,4 +104,21 @@ py -m pip install -r requirements.txt
 py motor_keyboard.py --port COM5
 ```
 
-Replace `COM5` with the correct port. Hold **W/A/S/D** to drive; releasing the active key stops, or resumes another movement key that is still held. **Space/X** stops immediately, **R** resets the encoder totals, and **Esc** exits and sends a final stop command. The controller assumes the firmware is flashed and the board is connected on USART2 at 115200 baud. Keep the wheels raised while testing.
+Replace `COM5` with the adapter's actual COM port. `--baud` may be specified if the firmware baud rate is changed; it defaults to 115200. The script requires the board to be flashed and connected. If the keyboard listener cannot access global keyboard events, run it from a normal desktop session with the required Windows permissions.
+
+## Build and flash
+
+1. Open STM32CubeIDE and import this folder as an existing project.
+2. Select the `Debug` configuration and build the project.
+3. Connect an ST-Link debugger and use **Run** or **Debug** to flash the Blue Pill.
+4. Connect the motor supply and USB-to-UART adapter, then start `motor_keyboard.py` or use another serial terminal to send commands.
+
+The STM32F1 HAL and CMSIS sources are included under `Drivers/`. Generated `Debug/`, `Release/`, and common Python cache/virtual-environment artifacts are excluded by `.gitignore`.
+
+## Safety and verification
+
+- Lift and secure the wheels for initial direction and PI testing.
+- Use a current-limited, correctly rated motor supply and driver; share ground with the MCU.
+- Keep the stop command available. `X` stops the motors and cancels encoder hold.
+- Verify motor direction, encoder polarity, counts/revolution, and one-cell ticks on the actual chassis before autonomous maze use.
+- Host GCC syntax checks do not replace an STM32CubeIDE ARM build or hardware validation. PI gains, hold response, and the 1060-tick cell target still require testing on the robot.
