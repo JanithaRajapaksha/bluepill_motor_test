@@ -43,16 +43,25 @@ class DifferentialDriveOdometry:
         self.last_counts = (left_count, right_count)
         self.last_time = time.monotonic()
 
-    def reset(self) -> None:
-        """Resets the robot pose back to (0, 0, 0) and clears path history."""
-        self.x_mm = 0.0
-        self.y_mm = 0.0
-        self.heading_rad = 0.0
+    def reset(self, x_mm: float = 0.0, y_mm: float = 0.0, heading_rad: float = 0.0) -> None:
+        """Resets the robot pose back to (x_mm, y_mm, heading_rad) and clears path history."""
+        self.x_mm = x_mm
+        self.y_mm = y_mm
+        self.heading_rad = heading_rad
         self.linear_speed_mm_s = 0.0
         self.angular_speed_rad_s = 0.0
-        self.path = [(0.0, 0.0)]
+        self.path = [(x_mm, y_mm)]
         self.last_counts = None
         self.last_time = None
+
+    def set_pose(self, x_mm: float, y_mm: float, heading_rad: float = 0.0) -> None:
+        """Sets the current pose and starts a new path."""
+        self.x_mm = x_mm
+        self.y_mm = y_mm
+        self.heading_rad = heading_rad
+        self.linear_speed_mm_s = 0.0
+        self.angular_speed_rad_s = 0.0
+        self.path = [(x_mm, y_mm)]
 
     def update_counts(
         self, left_count: int, right_count: int, timestamp: float | None = None

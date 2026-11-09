@@ -53,6 +53,11 @@ class SidebarWidget(QScrollArea):
     turn_180_requested = pyqtSignal()
     reset_pose_requested = pyqtSignal()
 
+    # Maze signals
+    load_maze_requested = pyqtSignal(str)
+    place_robot_origin_requested = pyqtSignal()
+    clear_maze_requested = pyqtSignal()
+
     cell_size_changed = pyqtSignal(float)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -170,7 +175,49 @@ class SidebarWidget(QScrollArea):
 
         layout.addSpacing(2)
 
-        # 3. CONTINUOUS DRIVE (WASD)
+        # 3. MAZE ENVIRONMENT
+        sec_maze = QLabel("MAZE ENVIRONMENT", sidebar)
+        sec_maze.setObjectName("sectionHeader")
+        layout.addWidget(sec_maze)
+
+        form_maze = QVBoxLayout()
+        form_maze.setSpacing(6)
+
+        self.maze_combo = QComboBox(sidebar)
+        self.maze_combo.setFixedHeight(28)
+        self.maze_combo.addItems([
+            "6x6 Test Maze",
+            "Empty 6x6 Maze",
+            "10x10 Test Maze",
+            "16x16 Competition Maze",
+        ])
+        form_maze.addWidget(self.maze_combo)
+
+        maze_btn_box = QHBoxLayout()
+        maze_btn_box.setSpacing(6)
+        self.btn_load_maze = QPushButton("Load Maze", sidebar)
+        self.btn_load_maze.setFixedHeight(28)
+        self.btn_load_maze.setObjectName("actionBtn")
+        self.btn_load_maze.clicked.connect(self._on_load_maze_clicked)
+
+        self.btn_place_start = QPushButton("Place at (0,0)", sidebar)
+        self.btn_place_start.setFixedHeight(28)
+        self.btn_place_start.setToolTip("Places robot at the center of cell (0,0) facing North")
+        self.btn_place_start.clicked.connect(self.place_robot_origin_requested.emit)
+
+        maze_btn_box.addWidget(self.btn_load_maze)
+        maze_btn_box.addWidget(self.btn_place_start)
+        form_maze.addLayout(maze_btn_box)
+
+        self.maze_status_lbl = QLabel("Maze: Not loaded", sidebar)
+        self.maze_status_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        form_maze.addWidget(self.maze_status_lbl)
+
+        layout.addLayout(form_maze)
+
+        layout.addSpacing(2)
+
+        # 4. CONTINUOUS DRIVE (WASD)
         sec3 = QLabel("CONTINUOUS DRIVE (WASD)", sidebar)
         sec3.setObjectName("sectionHeader")
         layout.addWidget(sec3)
@@ -380,3 +427,10 @@ class SidebarWidget(QScrollArea):
         self.btn_rev.setStyleSheet(active_style if v_sign < 0 else "")
         self.btn_left.setStyleSheet(active_style if w_sign > 0 else "")
         self.btn_right.setStyleSheet(active_style if w_sign < 0 else "")
+
+    def _on_load_maze_clicked(self) -> None:
+        self.load_maze_requested.emit(self.maze_combo.currentText())
+
+    def set_maze_status(self, text: str) -> None:
+        """Updates the maze status label."""
+        self.maze_status_lbl.setText(text)

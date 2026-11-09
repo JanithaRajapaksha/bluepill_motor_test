@@ -95,6 +95,7 @@ class OdometryApp(QMainWindow):
         self._setup_style()
         self._build_ui()
         self._refresh_ports()
+        self._on_load_maze("6x6 Test Maze")
 
     def _setup_style(self) -> None:
         self.setStyleSheet(get_app_stylesheet())
@@ -176,6 +177,10 @@ class OdometryApp(QMainWindow):
         sb.turn_180_requested.connect(self._action_turn_180)
         sb.reset_pose_requested.connect(self.reset_pose_and_encoders)
 
+        sb.load_maze_requested.connect(self._on_load_maze)
+        sb.place_robot_origin_requested.connect(self.place_robot_at_cell_0_0)
+        sb.clear_maze_requested.connect(self._on_clear_maze)
+
     def _refresh_ports(self) -> None:
         self.sidebar.port_combo.clear()
         ports = [port.device for port in list_ports.comports()]
@@ -201,6 +206,8 @@ class OdometryApp(QMainWindow):
         self.odometry = DifferentialDriveOdometry(
             left_cpr, right_cpr, wheel_dia, track_w
         )
+        if self.canvas.maze is not None:
+            self.odometry.set_pose(cell_size * 0.5, cell_size * 0.5, 0.0)
         self.canvas.set_odometry(self.odometry)
         self.canvas.set_cell_size(cell_size)
 
@@ -509,7 +516,11 @@ class OdometryApp(QMainWindow):
         self.current_w_cmd = 0.0
         self.sidebar.highlight_dpad(0, 0)
         self.send_command("x")
-        self.odometry.reset()
+        if self.canvas.maze is not None:
+            cell_size = self.sidebar.get_cell_distance_mm()
+            self.odometry.reset(cell_size * 0.5, cell_size * 0.5, 0.0)
+        else:
+            self.odometry.reset(0.0, 0.0, 0.0)
         self.reset_stage = "stopping"
         self.reset_deadline = time.monotonic() + 3.0
         self.sidebar.set_motion_label("RESETTING...")
@@ -519,6 +530,35 @@ class OdometryApp(QMainWindow):
         self.footer.update_pose(
             self.odometry.x_mm, self.odometry.y_mm, self.odometry.heading_rad
         )
+
+    def _on_load_maze(self, preset_name: str = "6x6 Test Maze") -> None:
+        """Loads a maze layout from the FloodFill-Micromouse submodule and places robot at (0,0)."""
+        try:
+            from gui import maze_loader
+
+            maze = maze_loader.load_preset(preset_name)
+            self.canvas.set_maze(maze)
+            self.sidebar.set_maze_status(f"Active: {preset_name} ({maze.size}x{maze.size})")
+            self.place_robot_at_cell_0_0()
+        except Exception as exc:
+            self.sidebar.set_maze_status(f"Error: {exc}")
+            QMessageBox.warning(self, "Failed to Load Maze", str(exc))
+
+    def _on_clear_maze(self) -> None:
+        """Clears the active maze from the canvas."""
+        self.canvas.set_maze(None)
+        self.sidebar.set_maze_status("Maze: None")
+        self.canvas.update()
+
+    def place_robot_at_cell_0_0(self) -> None:
+        """Positions the robot at the center of cell (0, 0) facing North (0.0 rad)."""
+        cell_size = self.sidebar.get_cell_distance_mm()
+        x0 = cell_size * 0.5
+        y0 = cell_size * 0.5
+        self.odometry.set_pose(x0, y0, heading_rad=0.0)
+        self.footer.update_pose(x0, y0, 0.0)
+        self.sidebar.set_motion_label("PLACED AT CELL (0,0)")
+        self.canvas.update()
 
     def _send_encoder_reset(self) -> None:
         if self.connection is None:

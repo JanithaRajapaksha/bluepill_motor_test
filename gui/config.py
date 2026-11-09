@@ -26,6 +26,14 @@ STOP_BG = "#422120"
 GRID_COLOR = "#233338"
 AXIS_COLOR = "#3d575c"
 
+# Maze visualization colors
+MAZE_WALL_COLOR = "#ef4444"      # Competition red walls
+MAZE_POST_COLOR = "#f8fafc"      # White corner posts
+MAZE_FLOOR_BG = "#10181e"        # Maze floor area
+MAZE_START_BG = "#133528"        # Subtle emerald green highlight for cell (0,0)
+MAZE_GOAL_BG = "#2a1e38"         # Subtle indigo/violet highlight for center goal cells
+MAZE_LABEL_COLOR = "#64748b"     # Coordinates / cell markers
+
 # Default hardware & motion geometry
 DEFAULT_LEFT_CPR = 815.70
 DEFAULT_RIGHT_CPR = 815.55
